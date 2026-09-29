@@ -1,0 +1,5 @@
+# Everything the compiler makes.  Rebuilt by build.bat, never edited by hand.
+build/
+
+# Reference material - books and the like.  Not ours to publish.
+misc/
