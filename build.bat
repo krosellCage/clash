@@ -53,13 +53,14 @@ echo WAITING FOR PDB > lock.tmp
 REM The game.  -LD makes a DLL; -EXPORT names what the platform looks up.
 REM The DirectX libraries are linked here, not into the exe - the platform
 REM never touches DirectX.
-cl %CompilerFlags% ..\code\game.cpp -Fegame.dll -Fmgame.map -LD /link -incremental:no -opt:ref -PDB:game_%random%.pdb -EXPORT:GameUpdateAndRender -EXPORT:GameShutdown d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
+cl %CompilerFlags% ..\code\game.cpp -Fegame.dll -Fmgame.map -LD /link -incremental:no -opt:ref -PDB:game_%random%.pdb -EXPORT:GameUpdateAndRender -EXPORT:GameGetSoundSamples -EXPORT:GameShutdown d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
 set GameResult=%ERRORLEVEL%
 
 del lock.tmp
 
-REM The platform.
-cl %CompilerFlags% ..\code\win32_dx12.cpp -Fedx12.exe -Fmdx12.map /link -incremental:no -opt:ref -subsystem:windows user32.lib gdi32.lib
+REM The platform.  ole32 is COM - CoCreateInstance and friends - which WASAPI,
+REM the sound API, is built on.
+cl %CompilerFlags% ..\code\win32_dx12.cpp -Fedx12.exe -Fmdx12.map /link -incremental:no -opt:ref -subsystem:windows user32.lib gdi32.lib ole32.lib
 set PlatformResult=%ERRORLEVEL%
 
 popd

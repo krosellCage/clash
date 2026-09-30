@@ -11,6 +11,9 @@
 #define NOMINMAX
 #include <windows.h>
 
+// WASAPI - Windows' audio API (IAudioClient, IAudioRenderClient).
+#include <audioclient.h>
+
 #include "platform.h"
 
 // The game DLL as currently loaded.
@@ -22,9 +25,37 @@ struct win32_game_code
     // IMPORTANT(yigit): Either can be 0 - a DLL that failed to load, or one
     // caught half-written by the compiler.  Check before calling.
     game_update_and_render *UpdateAndRender;
+    game_get_sound_samples *GetSoundSamples;
     game_shutdown *Shutdown;
 
     bool32 IsValid;
+};
+
+/*
+  The sound card, through WASAPI.
+
+  WASAPI keeps a ring of samples waiting to be played.  Every frame we ask
+  how many are still waiting, and top it back up to LatencyFrames - enough
+  to last until the next frame, with room to spare for a slow one.
+*/
+struct win32_sound_output
+{
+    // False when there is no sound device, or it would not start.  The game
+    // runs on regardless, silently.
+    bool32 IsValid;
+
+    IAudioClient *AudioClient;
+    IAudioRenderClient *RenderClient;
+
+    uint32 SamplesPerSecond;
+
+    // Frames: one left and one right 16-bit sample - 4 bytes.
+    uint32 BufferSizeInFrames;      // the whole ring, as WASAPI made it
+    uint32 LatencyFrames;           // how full we keep it
+
+    // Where the game writes before it is copied into WASAPI's ring.  Big
+    // enough for the whole ring, the most we could ever ask for at once.
+    int16 *Samples;
 };
 
 #define WIN32_STATE_FILE_NAME_COUNT MAX_PATH

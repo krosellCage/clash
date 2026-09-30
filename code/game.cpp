@@ -4,8 +4,9 @@
   arrives through game_memory and game_input (platform.h); it never calls
   Windows itself.
 
-  Two entry points, the only symbols the platform looks up:
+  Three entry points, the only symbols the platform looks up:
     GameUpdateAndRender   once per frame
+    GameGetSoundSamples   once per frame, after it
     GameShutdown          once, on the way out
 */
 
@@ -71,6 +72,14 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         // be 0 - and a zero-length Front makes the view matrix degenerate.
         CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, 3.0f));
 
+        // Music is optional.  Asked about first, so a project without a
+        // music file does not log an error on every start.
+        const char *MusicFileName = "data\\music.wav";
+        if(Memory->DEBUGPlatformGetFileWriteTime(Thread, MusicFileName))
+        {
+            State->Music = LoadWAV(Thread, Memory, &State->WorldArena, MusicFileName);
+        }
+
         Memory->IsInitialized = true;
     }
 
@@ -107,6 +116,13 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     if(State->Camera.MovementSpeed < CAMERA_MIN_SPEED) { State->Camera.MovementSpeed = CAMERA_MIN_SPEED; }
     if(State->Camera.MovementSpeed > CAMERA_MAX_SPEED) { State->Camera.MovementSpeed = CAMERA_MAX_SPEED; }
+
+    // Space: sound on and off.
+    if(WasPressed(Keyboard->Back))
+    {
+        State->SoundOn = !State->SoundOn;
+        Memory->DEBUGPlatformLog(Thread, State->SoundOn ? "sound on\n" : "sound off\n");
+    }
 
     // Pressed, not held: once per press.  Until there is something on screen,
     // this is how to see that the camera really moves - the line appears in
@@ -151,6 +167,32 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     }
 
     RendererRender(Renderer, Input);
+}
+
+extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)
+{
+    game_state *State = (game_state *)Memory->PermanentStorage;
+
+    // NOTE(yigit): Silence has to be WRITTEN.  Leave the buffer alone and
+    // the sound card plays whatever happened to be sitting in it - noise,
+    // not quiet.
+    if(!State->SoundOn)
+    {
+        WriteSilence(SoundBuffer);
+    }
+    else if(State->Music.Samples)
+    {
+        // NOTE(yigit): No resampling.  A file at a different rate from the
+        // output's (44100 against 48000, say) plays too fast or too slow,
+        // and at the wrong pitch - convert the file to match instead.
+        PlaySoundLooping(&State->Music, &State->MusicPlayCursor, SoundBuffer);
+    }
+    else
+    {
+        // Middle C, at a tenth of full volume - loud enough to hear, quiet
+        // enough not to hurt in headphones.
+        WriteTestTone(&State->TonePhase, SoundBuffer, 261.63f, 0.1f);
+    }
 }
 
 extern "C" GAME_SHUTDOWN(GameShutdown)

@@ -1,57 +1,15 @@
 #if !defined(GAME_H)
 /*
-  NOTE(yigit): The game layer's own types: the memory arena and game_state.
-  Platform-independent - no windows.h here.  (The renderer below it is not:
-  DirectX 12 only exists on Windows.)
+  NOTE(yigit): The game layer's own types - game_state, and the headers it
+  is built from.  Platform-independent - no windows.h here.  (The renderer
+  below it is not: DirectX 12 only exists on Windows.)
 */
 
 #include "platform.h"
+#include "arena.h"
 #include "game_math.h"
 #include "game_camera.h"
-
-/*
-  A block of memory handed out front to back, and never freed piece by
-  piece - only all at once, with ResetArena.  All the game's allocation goes
-  through these, carved out of the blocks in game_memory.
-*/
-struct memory_arena
-{
-    memory_index Size;
-    uint8 *Base;
-    memory_index Used;
-};
-
-// NOTE(yigit): An arena starts zeroed along with the rest of the storage it
-// sits in, so its Size is 0 and the first push would assert.  Every arena
-// has to be handed its block explicitly first.
-internal void
-InitializeArena(memory_arena *Arena, memory_index Size, uint8 *Base)
-{
-    Arena->Size = Size;
-    Arena->Used = 0;
-    Arena->Base = Base;
-}
-
-#define PushStruct(Arena, type) (type *)PushSize_(Arena, sizeof(type))
-#define PushArray(Arena, Count, type) (type *)PushSize_(Arena, (Count)*sizeof(type))
-
-internal void *
-PushSize_(memory_arena *Arena, memory_index Size)
-{
-    Assert((Arena->Used + Size) <= Arena->Size);
-    void *Result = Arena->Base + Arena->Used;
-    Arena->Used += Size;
-
-    return(Result);
-}
-
-// Hands the whole block back at once.  Only safe when nothing still points
-// into the arena.
-internal void
-ResetArena(memory_arena *Arena)
-{
-    Arena->Used = 0;
-}
+#include "game_sound.h"
 
 // Declared, never defined here - see the Renderer member below.
 struct dx12_renderer;
@@ -72,6 +30,13 @@ struct game_state
     // renderer.  (Nothing reads them yet - they are for the cube milestone.)
     mat4 View;
     mat4 Projection;
+
+    // Sound.  Space toggles it.  Plays data\music.wav if there is one, and
+    // a quiet test tone if not - so there is always something to hear.
+    bool32 SoundOn;
+    loaded_sound Music;         // samples in WorldArena
+    uint32 MusicPlayCursor;     // which frame of Music plays next
+    real32 TonePhase;           // where the test tone's sine wave is, 0..2pi
 
     // NOTE(yigit): An INCOMPLETE type, and only ever a pointer - into
     // RendererStorage, not into this block (see game_memory).  The game can

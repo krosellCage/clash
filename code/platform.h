@@ -5,11 +5,12 @@
   them is declared here, and nothing else does:
 
     platform -> game   input, memory, file services, the window
-    game -> platform   two functions: GameUpdateAndRender, GameShutdown
+    game -> platform   three functions: GameUpdateAndRender,
+                       GameGetSoundSamples, GameShutdown
 
   Carried over from the OpenGL project's handmade_platform.h.  Differences:
-  no gamepad, no sound, no OpenGL function table - and a third block of
-  memory, RendererStorage, for the reason given on game_memory.
+  no gamepad, no OpenGL function table - and a third block of memory,
+  RendererStorage, for the reason given on game_memory.
 */
 
 #include "base.h"
@@ -143,6 +144,22 @@ typedef struct game_input
 } game_input;
 
 /*
+  Sound.  Each frame the platform asks for however many samples the sound
+  card is about to run short of, and the game writes exactly that many.
+*/
+typedef struct game_sound_output_buffer
+{
+    int32 SamplesPerSecond;
+
+    // How many to write - in FRAMES: one frame is a left and a right sample.
+    int32 SampleCount;
+
+    // Where to write them: SampleCount pairs of 16-bit samples, left then
+    // right, back to back.
+    int16 *Samples;
+} game_sound_output_buffer;
+
+/*
   Memory.  The game never allocates: the platform hands it these blocks once,
   cleared to zero, and the game carves everything it needs out of them.
 */
@@ -189,6 +206,12 @@ typedef struct game_memory
 */
 #define GAME_UPDATE_AND_RENDER(name) void name(thread_context *Thread, game_memory *Memory, game_input *Input)
 typedef GAME_UPDATE_AND_RENDER(game_update_and_render);
+
+// NOTE(yigit): Has to be quick - it runs every frame, and a slow one delays
+// the frame it is part of.  Only ever called after GameUpdateAndRender has
+// run at least once, so game_state is set up by then.
+#define GAME_GET_SOUND_SAMPLES(name) void name(thread_context *Thread, game_memory *Memory, game_sound_output_buffer *SoundBuffer)
+typedef GAME_GET_SOUND_SAMPLES(game_get_sound_samples);
 
 // Called once, on the way out, while the game's memory is still valid - so
 // the renderer can wait for the GPU before anything is released.

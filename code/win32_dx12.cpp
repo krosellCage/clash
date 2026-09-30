@@ -5,8 +5,9 @@
 
   Carried over from the OpenGL project's win32_handmade.cpp: the same memory
   model, file services, DLL hot reload, input recording (L), pause (P), raw
-  mouse input, Tab for a free cursor, F11 for fullscreen.  Left behind:
-  sound, the gamepad, and OpenGL - DirectX is created by the game itself.
+  mouse input, Tab for a free cursor, F11 for fullscreen.  Sound is WASAPI
+  rather than DirectSound.  Left behind: the gamepad, and OpenGL - DirectX is
+  created by the game itself.
 
   The platform knows nothing about DirectX.  Drawing is entirely the game's.
 */
@@ -21,6 +22,9 @@
 #include <windows.h>
 
 #include <stdio.h>      // snprintf
+
+// WASAPI's device list: which sound card is the default one.
+#include <mmdeviceapi.h>
 
 #include "platform.h"
 #include "win32_dx12.h"
@@ -299,15 +303,18 @@ Win32LoadGameCode(char *SourceDLLName, char *TempDLLName)
     {
         Result.UpdateAndRender = (game_update_and_render *)
             GetProcAddress(Result.GameCodeDLL, "GameUpdateAndRender");
+        Result.GetSoundSamples = (game_get_sound_samples *)
+            GetProcAddress(Result.GameCodeDLL, "GameGetSoundSamples");
         Result.Shutdown = (game_shutdown *)
             GetProcAddress(Result.GameCodeDLL, "GameShutdown");
 
-        Result.IsValid = (Result.UpdateAndRender && Result.Shutdown);
+        Result.IsValid = (Result.UpdateAndRender && Result.GetSoundSamples && Result.Shutdown);
     }
 
     if(!Result.IsValid)
     {
         Result.UpdateAndRender = 0;
+        Result.GetSoundSamples = 0;
         Result.Shutdown = 0;
     }
 
@@ -325,7 +332,181 @@ Win32UnloadGameCode(win32_game_code *GameCode)
 
     GameCode->IsValid = false;
     GameCode->UpdateAndRender = 0;
+    GameCode->GetSoundSamples = 0;
     GameCode->Shutdown = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Sound (WASAPI)
+// ---------------------------------------------------------------------------
+
+// How far ahead of the speakers we keep the sound card fed.  Shorter answers
+// a key press sooner; longer survives a slow frame without a gap.  50 ms is
+// three frames at 60 Hz.
+#define WIN32_SOUND_LATENCY_SECONDS 0.05f
+
+/*
+  Opens the default sound device and starts it playing.  On any failure the
+  sound stays !IsValid and the game runs without it.
+
+  NOTE(yigit): WASAPI is COM, like DirectX: objects are made through
+  interfaces and released when done.  Two things differ from DirectSound in
+  the OpenGL project.  There is no play cursor or write cursor to reason
+  about - only "how many samples are still waiting".  And shared mode mixes
+  with every other program's sound, so the device's own format is fixed by
+  Windows; AUTOCONVERTPCM makes WASAPI convert ours to it, so we can ask for
+  plain 16-bit stereo whatever the device uses.
+*/
+internal void
+Win32InitWASAPI(win32_sound_output *Sound, uint32 SamplesPerSecond)
+{
+    Sound->SamplesPerSecond = SamplesPerSecond;
+
+    // COM has to be started on a thread before any COM object is made on it.
+    // S_FALSE means it already was, which is fine too.
+    HRESULT Result = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if(FAILED(Result))
+    {
+        OutputDebugStringA("ERROR: CoInitializeEx failed - no sound.\n");
+        return;
+    }
+
+    // The list of sound devices, and from it the default output - the one
+    // Windows' own volume icon controls.
+    IMMDeviceEnumerator *Enumerator = 0;
+    Result = CoCreateInstance(__uuidof(MMDeviceEnumerator), 0, CLSCTX_ALL,
+                              IID_PPV_ARGS(&Enumerator));
+    if(FAILED(Result))
+    {
+        OutputDebugStringA("ERROR: Could not list the sound devices - no sound.\n");
+        return;
+    }
+
+    IMMDevice *Device = 0;
+    Result = Enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &Device);
+    Enumerator->Release();
+    if(FAILED(Result))
+    {
+        OutputDebugStringA("ERROR: No default sound device - no sound.\n");
+        return;
+    }
+
+    Result = Device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, 0,
+                              (void **)&Sound->AudioClient);
+    Device->Release();
+    if(FAILED(Result))
+    {
+        OutputDebugStringA("ERROR: Could not open the sound device - no sound.\n");
+        return;
+    }
+
+    // What we will hand it: 16-bit samples, stereo, interleaved - the same as
+    // game_sound_output_buffer.
+    WAVEFORMATEX Format = {};
+    Format.wFormatTag = WAVE_FORMAT_PCM;
+    Format.nChannels = 2;
+    Format.nSamplesPerSec = SamplesPerSecond;
+    Format.wBitsPerSample = 16;
+    Format.nBlockAlign = (Format.nChannels * Format.wBitsPerSample) / 8;
+    Format.nAvgBytesPerSec = Format.nSamplesPerSec * Format.nBlockAlign;
+
+    // The ring: a tenth of a second, in WASAPI's unit of 100 nanoseconds.
+    // Twice the latency we aim for, so topping up never has to wait.
+    REFERENCE_TIME BufferDuration = 10000000 / 10;
+    DWORD Flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+
+    Result = Sound->AudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, Flags,
+                                            BufferDuration, 0, &Format, 0);
+    if(FAILED(Result))
+    {
+        OutputDebugStringA("ERROR: The sound device would not take our format - no sound.\n");
+        Sound->AudioClient->Release();
+        Sound->AudioClient = 0;
+        return;
+    }
+
+    Result = Sound->AudioClient->GetService(IID_PPV_ARGS(&Sound->RenderClient));
+    if(FAILED(Result))
+    {
+        OutputDebugStringA("ERROR: No render client from the sound device - no sound.\n");
+        Sound->AudioClient->Release();
+        Sound->AudioClient = 0;
+        return;
+    }
+
+    // The ring may not be exactly what was asked for; this is what it is.
+    UINT32 BufferSizeInFrames = 0;
+    Sound->AudioClient->GetBufferSize(&BufferSizeInFrames);
+    Sound->BufferSizeInFrames = BufferSizeInFrames;
+
+    Sound->LatencyFrames = (uint32)(WIN32_SOUND_LATENCY_SECONDS * (real32)SamplesPerSecond);
+    if(Sound->LatencyFrames > Sound->BufferSizeInFrames)
+    {
+        Sound->LatencyFrames = Sound->BufferSizeInFrames;
+    }
+
+    Sound->Samples = (int16 *)VirtualAlloc(0, Sound->BufferSizeInFrames * 2 * sizeof(int16),
+                                           MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
+    if(!Sound->Samples)
+    {
+        return;
+    }
+
+    Sound->AudioClient->Start();
+    Sound->IsValid = true;
+}
+
+/*
+  Tops the sound card's ring back up to LatencyFrames, with samples from the
+  game - or with silence, when WriteSilence is set (paused, minimised).
+*/
+internal void
+Win32FillSoundBuffer(win32_sound_output *Sound, win32_game_code *Game,
+                     thread_context *Thread, game_memory *Memory, bool32 WriteSilence)
+{
+    if(!Sound->IsValid)
+    {
+        return;
+    }
+
+    // How many frames are still waiting to be played.
+    UINT32 Padding = 0;
+    if(FAILED(Sound->AudioClient->GetCurrentPadding(&Padding)))
+    {
+        return;
+    }
+
+    if(Padding >= Sound->LatencyFrames)
+    {
+        return;
+    }
+
+    uint32 FramesToWrite = Sound->LatencyFrames - Padding;
+
+    game_sound_output_buffer SoundBuffer = {};
+    SoundBuffer.SamplesPerSecond = (int32)Sound->SamplesPerSecond;
+    SoundBuffer.SampleCount = (int32)FramesToWrite;
+    SoundBuffer.Samples = Sound->Samples;
+
+    bool32 Silent = WriteSilence || !Game->GetSoundSamples;
+    if(!Silent)
+    {
+        Game->GetSoundSamples(Thread, Memory, &SoundBuffer);
+    }
+
+    // Borrow that many frames of the ring, fill them, give them back.
+    BYTE *Destination = 0;
+    if(SUCCEEDED(Sound->RenderClient->GetBuffer(FramesToWrite, &Destination)))
+    {
+        if(!Silent)
+        {
+            CopyMemory(Destination, Sound->Samples, FramesToWrite * 2 * sizeof(int16));
+        }
+
+        // SILENT tells WASAPI to play zeros for these, without our having to
+        // write them.
+        Sound->RenderClient->ReleaseBuffer(FramesToWrite, Silent ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -938,6 +1119,11 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
         return(1);
     }
 
+    // 48000 is what nearly every sound device runs at, so WASAPI rarely has
+    // to convert.
+    win32_sound_output SoundOutput = {};
+    Win32InitWASAPI(&SoundOutput, 48000);
+
     win32_game_code Game = Win32LoadGameCode(SourceGameCodeDLLFullPath, TempGameCodeDLLFullPath);
 
     // Two, swapped every frame: this frame's input is built in NewInput,
@@ -1000,6 +1186,11 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
         bool32 Minimised = (GlobalClientWidth == 0) || (GlobalClientHeight == 0);
         if(Minimised || GlobalPause)
         {
+            // The sound card still has to be fed - with silence - or it runs
+            // dry and stutters when the game comes back.
+            thread_context Thread = {};
+            Win32FillSoundBuffer(&SoundOutput, &Game, &Thread, &GameMemory, true);
+
             Sleep(10);
         }
         else
@@ -1026,6 +1217,9 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
                 Game.UpdateAndRender(&Thread, &GameMemory, NewInput);
             }
 
+            // After the update, so a key pressed this frame is already heard.
+            Win32FillSoundBuffer(&SoundOutput, &Game, &Thread, &GameMemory, false);
+
             // Frame time and rate in the title bar, twice a second.
             // Averaged, because a single frame's number flickers too fast to
             // read.
@@ -1034,11 +1228,12 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
             if(TitleTimer >= 0.5f)
             {
                 char Title[128];
-                snprintf(Title, sizeof(Title), "dx12  -  %.2f ms  %.0f fps%s%s",
+                snprintf(Title, sizeof(Title), "dx12  -  %.2f ms  %.0f fps%s%s%s",
                          1000.0f*TitleTimer / (real32)TitleFrames,
                          (real32)TitleFrames / TitleTimer,
                          Win32State.InputRecordingIndex ? "  [RECORDING]" : "",
-                         Win32State.InputPlayingIndex ? "  [PLAYING BACK]" : "");
+                         Win32State.InputPlayingIndex ? "  [PLAYING BACK]" : "",
+                         SoundOutput.IsValid ? "" : "  [NO SOUND]");
                 SetWindowTextA(Window, Title);
 
                 TitleTimer = 0.0f;
@@ -1058,6 +1253,13 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
         Game.Shutdown(&Thread, &GameMemory);
     }
     Win32UnloadGameCode(&Game);
+
+    // Stopped before the process ends, or the last few milliseconds in the
+    // ring can come out as a click.
+    if(SoundOutput.IsValid)
+    {
+        SoundOutput.AudioClient->Stop();
+    }
 
     return(0);
 }
