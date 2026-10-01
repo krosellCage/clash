@@ -31,14 +31,52 @@ InitializeArena(memory_arena *Arena, memory_index Size, uint8 *Base)
     Arena->Base = Base;
 }
 
-#define PushStruct(Arena, type) (type *)PushSize_(Arena, sizeof(type))
-#define PushArray(Arena, Count, type) (type *)PushSize_(Arena, (Count)*sizeof(type))
+#define PushStruct(Arena, type, ...) (type *)PushSize_(Arena, sizeof(type), ## __VA_ARGS__)
+#define PushArray(Arena, Count, type, ...) (type *)PushSize_(Arena, (Count)*sizeof(type), ## __VA_ARGS__)
 
-internal void *
-PushSize_(memory_arena *Arena, memory_index Size)
+// How many bytes to skip so the next push starts on an Alignment boundary.
+//
+// NOTE(yigit): Measured on the ADDRESS, not on Used.  An arena's Base is not
+// aligned itself - WorldArena starts just past game_state - so a Used that is
+// a multiple of 16 can still be an address that is not.
+internal memory_index
+GetAlignmentOffset(memory_arena *Arena, memory_index Alignment)
 {
+    // A power of two has exactly one bit set, so subtracting one sets every
+    // bit below it - which is the mask the & below needs.
+    Assert((Alignment & (Alignment - 1)) == 0);
+
+    memory_index ResultPointer = (memory_index)(Arena->Base + Arena->Used);
+    memory_index AlignmentMask = Alignment - 1;
+
+    memory_index AlignmentOffset = 0;
+    if(ResultPointer & AlignmentMask)
+    {
+        AlignmentOffset = Alignment - (ResultPointer & AlignmentMask);
+    }
+
+    return(AlignmentOffset);
+}
+
+/*
+  Every push starts on a 16-byte boundary, unless asked otherwise:
+
+    PushStruct(Arena, thing)         16
+    PushStruct(Arena, thing, 64)     64 - a cache line
+    PushArray(Arena, 100, int16, 2)  2  - for packing small things tightly
+
+  NOTE(yigit): 16 because that is what the SSE types need - XMVECTOR and
+  XMMATRIX are loaded with instructions that crash on an address that is not
+  a multiple of 16.  Wasting up to 15 bytes a push is the price.
+*/
+internal void *
+PushSize_(memory_arena *Arena, memory_index Size, memory_index Alignment = 16)
+{
+    memory_index AlignmentOffset = GetAlignmentOffset(Arena, Alignment);
+    Size += AlignmentOffset;
+
     Assert((Arena->Used + Size) <= Arena->Size);
-    void *Result = Arena->Base + Arena->Used;
+    void *Result = Arena->Base + Arena->Used + AlignmentOffset;
     Arena->Used += Size;
 
     return(Result);
