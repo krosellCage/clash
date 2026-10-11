@@ -52,8 +52,8 @@ typedef size_t   memory_index;
 #define ArrayCount(Array) (sizeof(Array) / sizeof((Array)[0]))
 
 // Stops in the debugger, on the failing line, when Expression is false.
-// Compiled out entirely when DX12_DEBUG is 0.
-#if DX12_DEBUG
+// Compiled out entirely when CLASH_DEBUG is 0.
+#if CLASH_DEBUG
 #define Assert(Expression) do { if(!(Expression)) { __debugbreak(); } } while(0)
 #else
 #define Assert(Expression)

@@ -8,7 +8,7 @@
 -fno-exceptions
 -D_MT
 -D_DEBUG
--DDX12_DEBUG=1
+-DCLASH_DEBUG=1
 -I.
 -Wall
 -Wno-unused-parameter

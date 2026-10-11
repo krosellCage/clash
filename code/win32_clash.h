@@ -1,11 +1,11 @@
-#if !defined(WIN32_DX12_H)
+#if !defined(WIN32_CLASH_H)
 /*
   NOTE(yigit): The platform layer's own types - nothing here crosses to the
   game.
 */
 
 // HMODULE, FILETIME, HANDLE - and the game's entry point types.  Both are
-// already included by win32_dx12.cpp, so their include guards make these do
+// already included by win32_clash.cpp, so their include guards make these do
 // nothing in the build; they are here so the file stands on its own.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -94,5 +94,5 @@ struct win32_state
     char *OnePastLastEXEFileNameSlash;
 };
 
-#define WIN32_DX12_H
+#define WIN32_CLASH_H
 #endif

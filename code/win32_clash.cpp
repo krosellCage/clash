@@ -12,6 +12,11 @@
   The platform knows nothing about DirectX.  Drawing is entirely the game's.
 */
 
+/* 
+  TODO(yigit):
+  D3D12 initialization.
+*/
+
 #include "base.h"
 
 // NOTE(yigit): WIN32_LEAN_AND_MEAN leaves out the rarely used half of
@@ -27,7 +32,7 @@
 #include <mmdeviceapi.h>
 
 #include "platform.h"
-#include "win32_dx12.h"
+#include "win32_clash.h"
 
 // The size of the window's INSIDE - what gets drawn into.  The outer size
 // adds the title bar and borders on top of this.
@@ -134,7 +139,7 @@ Win32GetEXEFileName(win32_state *State)
     }
 }
 
-// A file next to the exe: "C:\dx12\build\" + FileName.
+// A file next to the exe: "C:\clash\build\" + FileName.
 internal void
 Win32BuildEXEPathFileName(win32_state *State, char *FileName,
                           size_t DestCount, char *Dest)
@@ -145,7 +150,7 @@ Win32BuildEXEPathFileName(win32_state *State, char *FileName,
 }
 
 /*
-  Makes "the current directory" the project root - C:\dx12 - wherever the
+  Makes "the current directory" the project root - C:\clash - wherever the
   program was started from.  The exe sits in build\, the shaders in data\, so
   from the root every file is simply "data\name.hlsl".
 
@@ -160,8 +165,8 @@ Win32SetWorkingDirectoryToProjectRoot(win32_state *State)
     CatStrings(StringLength(State->EXEFileName), State->EXEFileName, 0, 0,
                sizeof(Path), Path);
 
-    // "C:\dx12\build\dx12.exe" - cut after the last two backslashes, which
-    // leaves "C:\dx12".
+    // "C:\clash\build\clash.exe" - cut after the last two backslashes, which
+    // leaves "C:\clash".
     for(int32 Cut = 0; Cut < 2; ++Cut)
     {
         char *LastSlash = 0;
@@ -844,7 +849,7 @@ Win32ProcessPendingMessages(win32_state *State, game_input *NewInput)
                     {
                         Win32ToggleFullscreen(Message.hwnd);
                     }
-#if DX12_DEBUG
+#if CLASH_DEBUG
                     else if((VKCode == 'P') && IsDown)
                     {
                         GlobalPause = !GlobalPause;
@@ -1027,11 +1032,11 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
     WindowClass.hInstance = Instance;
     WindowClass.hCursor = LoadCursorA(0, IDC_ARROW);
     WindowClass.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    WindowClass.lpszClassName = "DX12WindowClass";
+    WindowClass.lpszClassName = "ClashWindowClass";
 
     if(!RegisterClassA(&WindowClass))
     {
-        MessageBoxA(0, "Could not register the window class.", "dx12", MB_OK | MB_ICONERROR);
+        MessageBoxA(0, "Could not register the window class.", "clash", MB_OK | MB_ICONERROR);
         return(1);
     }
 
@@ -1039,7 +1044,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
     RECT WindowRect = {0, 0, START_CLIENT_WIDTH, START_CLIENT_HEIGHT};
     AdjustWindowRect(&WindowRect, WS_OVERLAPPEDWINDOW, FALSE);
 
-    HWND Window = CreateWindowExA(0, WindowClass.lpszClassName, "dx12",
+    HWND Window = CreateWindowExA(0, WindowClass.lpszClassName, "clash",
                                   WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                                   CW_USEDEFAULT, CW_USEDEFAULT,
                                   WindowRect.right - WindowRect.left,
@@ -1047,7 +1052,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
                                   0, 0, Instance, 0);
     if(!Window)
     {
-        MessageBoxA(0, "Could not create the window.", "dx12", MB_OK | MB_ICONERROR);
+        MessageBoxA(0, "Could not create the window.", "clash", MB_OK | MB_ICONERROR);
         return(1);
     }
 
@@ -1079,7 +1084,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
     // lays the game's memory out identically - a recorded state file then
     // still makes sense in the next run, pointers and all.  Anywhere the
     // system likes in a release build.
-#if DX12_DEBUG
+#if CLASH_DEBUG
     LPVOID BaseAddress = (LPVOID)Terabytes(2);
 #else
     LPVOID BaseAddress = 0;
@@ -1090,7 +1095,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
     GameMemory.TransientStorageSize = Gigabytes(1);
     GameMemory.RendererStorageSize  = Megabytes(1);
     GameMemory.PlatformWindow = Window;
-#if DX12_DEBUG
+#if CLASH_DEBUG
     GameMemory.DEBUGPlatformFreeFileMemory = DEBUGPlatformFreeFileMemory;
     GameMemory.DEBUGPlatformReadEntireFile = DEBUGPlatformReadEntireFile;
     GameMemory.DEBUGPlatformWriteEntireFile = DEBUGPlatformWriteEntireFile;
@@ -1115,7 +1120,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
     if(!GameMemory.PermanentStorage || !GameMemory.RendererStorage)
     {
         ShowCursor(TRUE);
-        MessageBoxA(Window, "Could not allocate the game's memory.", "dx12", MB_OK | MB_ICONERROR);
+        MessageBoxA(Window, "Could not allocate the game's memory.", "clash", MB_OK | MB_ICONERROR);
         return(1);
     }
 
@@ -1228,7 +1233,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
             if(TitleTimer >= 0.5f)
             {
                 char Title[128];
-                snprintf(Title, sizeof(Title), "dx12  -  %.2f ms  %.0f fps%s%s%s",
+                snprintf(Title, sizeof(Title), "clash  -  %.2f ms  %.0f fps%s%s%s",
                          1000.0f*TitleTimer / (real32)TitleFrames,
                          (real32)TitleFrames / TitleTimer,
                          Win32State.InputRecordingIndex ? "  [RECORDING]" : "",

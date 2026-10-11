@@ -18,7 +18,7 @@
 
   Milestones - finish each one, and see it work, before the next:
 
-    1. Debug layer on (only when DX12_DEBUG is 1), then a device.
+    1. Debug layer on (only when CLASH_DEBUG is 1), then a device.
        Log which GPU you got.
     2. Command queue, swapchain for the window, command allocator and list,
        a fence.  CLEAR THE WINDOW TO A COLOUR every frame.

@@ -2,10 +2,10 @@
 REM NOTE(yigit): Builds two things into build\:
 REM
 REM   game.dll   everything in code\game.cpp - the game and the renderer.
-REM              Rebuild it while dx12.exe is running and the new code is
+REM              Rebuild it while clash.exe is running and the new code is
 REM              swapped in on the next frame.
-REM   dx12.exe   the platform layer, code\win32_dx12.cpp.  Only needs
-REM              rebuilding when the platform changes - and dx12.exe must
+REM   clash.exe   the platform layer, code\win32_clash.cpp.  Only needs
+REM              rebuilding when the platform changes - and clash.exe must
 REM              not be running then, or Windows will not let it be replaced.
 REM
 REM Works from any directory - %~dp0 is the folder this script lives in.
@@ -32,20 +32,20 @@ REM -wd4505      ...and "unused function"
 REM -wd4201      ...and "nameless struct/union", which the input structs use
 REM -GR- -EHa-   no C++ run-time type info, no exceptions: neither is used
 REM -MTd         the C runtime linked in, so nothing extra has to be installed
-REM -DDX12_DEBUG=1  development build: Assert, P, L, and the debug file services
-set CompilerFlags=-MTd -nologo -Gm- -GR- -EHa- -Od -Oi -WX -W4 -wd4100 -wd4189 -wd4505 -wd4201 -FC -Z7 -DDX12_DEBUG=1
+REM -DCLASH_DEBUG=1  development build: Assert, P, L, and the debug file services
+set CompilerFlags=-MTd -nologo -Gm- -GR- -EHa- -Od -Oi -WX -W4 -wd4100 -wd4189 -wd4505 -wd4201 -FC -Z7 -DCLASH_DEBUG=1
 
 if not exist build mkdir build
 pushd build
 
 REM NOTE(yigit): The DLL's debug info gets a new, random name every build.
-REM While dx12.exe runs, the debugger holds the old .pdb open, and a build
+REM While clash.exe runs, the debugger holds the old .pdb open, and a build
 REM that tried to overwrite it would fail.  The del clears out the old ones
 REM that are no longer held.
 del game_*.pdb >nul 2>nul
 
 REM NOTE(yigit): lock.tmp exists for exactly as long as game.dll is being
-REM written.  A running dx12.exe does not reload while it is there - without
+REM written.  A running clash.exe does not reload while it is there - without
 REM it, it can catch the linker halfway through, load a half-written DLL (or
 REM fail to copy it), and then never notice the finished one.
 echo WAITING FOR PDB > lock.tmp
@@ -60,7 +60,7 @@ del lock.tmp
 
 REM The platform.  ole32 is COM - CoCreateInstance and friends - which WASAPI,
 REM the sound API, is built on.
-cl %CompilerFlags% ..\code\win32_dx12.cpp -Fedx12.exe -Fmdx12.map /link -incremental:no -opt:ref -subsystem:windows user32.lib gdi32.lib ole32.lib
+cl %CompilerFlags% ..\code\win32_clash.cpp -Feclash.exe -Fmclash.map /link -incremental:no -opt:ref -subsystem:windows user32.lib gdi32.lib ole32.lib
 set PlatformResult=%ERRORLEVEL%
 
 popd
@@ -73,7 +73,7 @@ if %GameResult% neq 0 (
 )
 if %PlatformResult% neq 0 (
     echo.
-    echo PLATFORM BUILD FAILED  -  is dx12.exe still running?
+    echo PLATFORM BUILD FAILED  -  is clash.exe still running?
     exit /b %PlatformResult%
 )
 exit /b 0

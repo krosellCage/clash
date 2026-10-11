@@ -1,6 +1,6 @@
 #if !defined(PLATFORM_H)
 /*
-  NOTE(yigit): The contract between the platform layer (win32_dx12.cpp, the
+  NOTE(yigit): The contract between the platform layer (win32_clash.cpp, the
   .exe) and the game (game.cpp, the .dll).  Everything that crosses between
   them is declared here, and nothing else does:
 
@@ -31,7 +31,7 @@ typedef struct thread_context
 /*
   Services the platform provides to the game.
 */
-#if DX12_DEBUG
+#if CLASH_DEBUG
 /* IMPORTANT(yigit):
    These are NOT for anything in a shipping game - they block, and the write
    does not protect against lost data.
@@ -192,7 +192,7 @@ typedef struct game_memory
     // swapchain.
     void *PlatformWindow;
 
-#if DX12_DEBUG
+#if CLASH_DEBUG
     debug_platform_free_file_memory *DEBUGPlatformFreeFileMemory;
     debug_platform_read_entire_file *DEBUGPlatformReadEntireFile;
     debug_platform_write_entire_file *DEBUGPlatformWriteEntireFile;
