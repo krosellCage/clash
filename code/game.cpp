@@ -16,6 +16,10 @@
 
 #include "dx12_renderer.cpp"
 
+// SimpleMath's constants (Vector3::Up, Matrix::Identity...) are defined in
+// its .cpp - and this is a unity build, so it is compiled by including it.
+#include "external/DirectXTK12/SimpleMath.cpp"
+
 /*
   The renderer, started on first use.
 

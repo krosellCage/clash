@@ -1,22 +1,25 @@
 #ifndef GAME_MATH_H
 #define GAME_MATH_H
 /*
-  NOTE(yigit): Vectors and matrices, carried over from the OpenGL project's
-  handmade_math.h.  Same conventions: right-handed (the camera looks down -Z),
-  column vectors, matrices stored COLUMN-major.
+  NOTE(yigit): Vectors and matrices.  Right-handed (the camera looks down
+  -Z), ROW vectors, matrices stored ROW-major - the same convention as Frank
+  Luna's book and DirectXMath, so his maths can be followed as written.
 
-  Changed for DirectX: the two projection matrices.  After projection,
-  OpenGL keeps depth between -1 and 1; DirectX keeps it between 0 and 1.
-  Everything else - x and y from -1 to 1, y pointing up - is the same.
+    - A vector is a row, and goes on the LEFT:  v * M.
+    - Transforms read left to right, in the order they happen:
+          World = Scale * Rotation * Translation
+      "scale first, then rotate, then move".
+    - E[Row*4 + Col].  Row i of a transform is where axis i lands, and the
+      bottom row (E[12..14]) holds the translation.
 
-  NOTE(yigit): Column-major matters when a matrix reaches a shader.  HLSL
-  also reads a float4x4 in a constant buffer as column-major unless told
-  otherwise, so a mat4 from here can be copied in as it is - and the shader
-  then multiplies matrix-first: mul(ViewProjection, Position).  Frank Luna
-  does the opposite everywhere (DirectXMath is row-major, and his shaders say
-  mul(Position, Matrix)), which is why his code transposes before every
-  upload.  Mixing the two conventions is the classic way to get a cube that
-  is squashed, inside out, or not there at all.
+  Projection is DirectX's: depth comes out 0 at Near and 1 at Far.
+
+  NOTE(yigit): Shaders.  HLSL reads a float4x4 in a constant buffer as
+  column-major unless told otherwise, so - exactly as Luna does - transpose a
+  matrix on its way into a constant buffer, and multiply vector-first in the
+  shader: mul(Position, WorldViewProj).  Forget the transpose and the shader
+  sees the matrix mirrored across its diagonal: a cube that is squashed,
+  inside out, or not there at all.
 */
 
 #include "base.h"
@@ -31,7 +34,7 @@ inline real32 Cos(real32 Angle) { return(cosf(Angle)); }
 
 struct mat4
 {
-    real32 E[16]; // column-major
+    real32 E[16]; // row-major: E[Row*4 + Col]
 };
 
 inline mat4
@@ -43,32 +46,45 @@ Mat4Identity()
     return(M);
 }
 
+// A * B: A happens first, then B.  Entry (Row, Col) is row Row of A dotted
+// with column Col of B.
 inline mat4
 Mat4Mul(mat4 A, mat4 B)
 {
     mat4 M = {};
-    for(int Col = 0; Col < 4; ++Col)
+    for(int Row = 0; Row < 4; ++Row)
     {
-        for(int Row = 0; Row < 4; ++Row)
+        for(int Col = 0; Col < 4; ++Col)
         {
             real32 Sum = 0;
             for(int K = 0; K < 4; ++K)
             {
-                Sum += A.E[K*4 + Row] * B.E[Col*4 + K];
+                Sum += A.E[Row*4 + K] * B.E[K*4 + Col];
             }
-            M.E[Col*4 + Row] = Sum;
+            M.E[Row*4 + Col] = Sum;
         }
     }
     return(M);
 }
 
+// So World = Scale * Rotation * Translation can be written as it reads.
+inline mat4 operator*(mat4 A, mat4 B) { return(Mat4Mul(A, B)); }
+
 /*
   Perspective projection, for DirectX: depth comes out 0 at Near and 1 at Far.
 
-  NOTE(yigit): Only E[10] and E[14] differ from the OpenGL version, which
-  mapped Near..Far to -1..1.  Used unchanged, that would put everything in
-  the front half of the view outside DirectX's 0..1 range, and it would
-  silently vanish.
+    [ F/Aspect  0   0                  0 ]
+    [ 0         F   0                  0 ]
+    [ 0         0   Far/(Near-Far)    -1 ]
+    [ 0         0   Near*Far/(Near-Far) 0 ]
+
+  The -1 at row 2, column 3 copies the eye-space -Z into W, and the GPU's
+  divide by W is what makes distant things smaller.
+
+  NOTE(yigit): Only the two depth entries differ from OpenGL's version,
+  which mapped Near..Far to -1..1.  Used unchanged, that would put everything
+  in the front half of the view outside DirectX's 0..1 range, and it would
+  silently vanish.  Same as XMMatrixPerspectiveFovRH.
 */
 inline mat4
 Mat4Perspective(real32 FovYRadians, real32 Aspect, real32 Near, real32 Far)
@@ -77,8 +93,7 @@ Mat4Perspective(real32 FovYRadians, real32 Aspect, real32 Near, real32 Far)
     real32 F = 1.0f / tanf(FovYRadians * 0.5f);
     M.E[0]  =  F / Aspect;
     M.E[5]  =  F;
-    M.E[10] = Far / (Near - Far);
-    M.E[11] = -1.0f;
+    M.E[10] = Far / (Near - Far);           M.E[11] = -1.0f;
     M.E[14] = (Near * Far) / (Near - Far);
     return(M);
 }
@@ -88,16 +103,16 @@ Mat4Perspective(real32 FovYRadians, real32 Aspect, real32 Near, real32 Far)
   anything.  What 2D overlays are drawn with: HUD, debug text, anything meant
   to sit flat on the screen.
 
-  NOTE(yigit): The difference from Mat4Perspective is the row that is NOT set
-  here.  Perspective puts -1 in E[11], which lands the eye-space Z in the
-  clip-space W, and the divide by W is what makes distant things smaller.
-  Ortho leaves E[11] at 0 and E[15] at 1, so W is always 1 and no divide
-  happens at all.
+  NOTE(yigit): The difference from Mat4Perspective is the entry that is NOT
+  set here.  Perspective puts -1 in E[11] (row 2, column 3), which lands the
+  eye-space Z in the clip-space W, and the divide by W is what makes distant
+  things smaller.  Ortho leaves E[11] at 0 and E[15] at 1, so W is always 1
+  and no divide happens at all.
 
   This is a plain remap: the box (Left..Right, Bottom..Top, Near..Far) becomes
   x and y from -1 to 1 and depth from 0 to 1, DirectX's clip space.  The
-  E[12..14] terms are the shift that centres the box, the E[0], E[5], E[10]
-  terms are the scale that sizes it.
+  diagonal - E[0], E[5], E[10] - is the scale that sizes the box, and the
+  bottom row - E[12..14] - is the shift that centres it.
 
   For screen-space text call it as
 
@@ -128,7 +143,13 @@ Mat4Ortho(real32 Left, real32 Right, real32 Bottom, real32 Top,
     return(M);
 }
 
-// Translation matrix
+// Translation matrix - the move goes in the bottom row:
+//   [ 1 0 0 0 ]
+//   [ 0 1 0 0 ]
+//   [ 0 0 1 0 ]
+//   [ X Y Z 1 ]
+// A point has W = 1, so v * M adds X, Y, Z to it.  A direction has W = 0,
+// and is not moved.
 inline mat4
 Mat4Translation(real32 X, real32 Y, real32 Z)
 {
@@ -150,50 +171,56 @@ Mat4Scale(real32 X, real32 Y, real32 Z)
     return(M);
 }
 
-inline struct mat4 Mat4RotationX(real32 angle) {
-    struct mat4 M = Mat4Identity();
-    real32 c = cosf(angle);
-    real32 s = sinf(angle);
+// Rotations about one axis, counterclockwise looking down that axis toward
+// the origin.  Each row is where that axis ends up - which is why the axis
+// being rotated around keeps its own row untouched.  Same as
+// XMMatrixRotationX/Y/Z.
+inline mat4
+Mat4RotationX(real32 Angle)
+{
+    mat4 M = Mat4Identity();
+    real32 c = cosf(Angle);
+    real32 s = sinf(Angle);
 
-    // Column-major layout for X rotation:
-    // [ 1  0    0   0 ]
-    // [ 0 cos -sin  0 ]
-    // [ 0 sin  cos  0 ]
-    // [ 0  0    0   1 ]
-    M.E[5]  = c;  M.E[9]  = -s;
-    M.E[6]  = s;  M.E[10] = c;
-    return M;
+    // [ 1  0   0   0 ]
+    // [ 0  c   s   0 ]
+    // [ 0 -s   c   0 ]
+    // [ 0  0   0   1 ]
+    M.E[5] =  c;  M.E[6]  = s;
+    M.E[9] = -s;  M.E[10] = c;
+    return(M);
 }
 
-// Rotation around Y-axis
-inline struct mat4 Mat4RotationY(real32 angle) {
-    struct mat4 M = Mat4Identity();
-    real32 c = cosf(angle);
-    real32 s = sinf(angle);
+inline mat4
+Mat4RotationY(real32 Angle)
+{
+    mat4 M = Mat4Identity();
+    real32 c = cosf(Angle);
+    real32 s = sinf(Angle);
 
-    // Column-major layout for Y rotation:
-    // [ cos 0  sin  0 ]
-    // [  0  1   0   0 ]
-    // [-sin 0  cos  0 ]
-    // [  0  0   0   1 ]
-    M.E[0]  = c;  M.E[8]  = s;
-    M.E[2]  = -s; M.E[10] = c;
-    return M;
+    // [ c  0  -s   0 ]
+    // [ 0  1   0   0 ]
+    // [ s  0   c   0 ]
+    // [ 0  0   0   1 ]
+    M.E[0] = c;  M.E[2]  = -s;
+    M.E[8] = s;  M.E[10] =  c;
+    return(M);
 }
 
-inline struct mat4 Mat4RotationZ(real32 angle) {
-    struct mat4 M = Mat4Identity();
-    real32 c = cosf(angle);
-    real32 s = sinf(angle);
+inline mat4
+Mat4RotationZ(real32 Angle)
+{
+    mat4 M = Mat4Identity();
+    real32 c = cosf(Angle);
+    real32 s = sinf(Angle);
 
-    // Column-major layout for Z rotation:
-    // [ cos -sin  0   0 ]
-    // [ sin  cos  0   0 ]
-    // [  0    0   1   0 ]
-    // [  0    0   0   1 ]
-    M.E[0]  = c;  M.E[4]  = -s;
-    M.E[1]  = s;  M.E[5] = c;
-    return M;
+    // [ c  s   0   0 ]
+    // [-s  c   0   0 ]
+    // [ 0  0   1   0 ]
+    // [ 0  0   0   1 ]
+    M.E[0] =  c;  M.E[1] = s;
+    M.E[4] = -s;  M.E[5] = c;
+    return(M);
 }
 
 // NOTE(yigit): Added for OBJ texture coordinates.  Deliberately bare - no
@@ -237,9 +264,13 @@ Mat4RotationAxis(vec3 Axis, real32 Angle)
     real32 s = sinf(Angle);
     real32 t = 1.0f - c;
 
-    M.E[0] = t*A.X*A.X + c;      M.E[4] = t*A.X*A.Y - s*A.Z;  M.E[8]  = t*A.X*A.Z + s*A.Y;
-    M.E[1] = t*A.X*A.Y + s*A.Z;  M.E[5] = t*A.Y*A.Y + c;      M.E[9]  = t*A.Y*A.Z - s*A.X;
-    M.E[2] = t*A.X*A.Z - s*A.Y;  M.E[6] = t*A.Y*A.Z + s*A.X;  M.E[10] = t*A.Z*A.Z + c;
+    // As in Luna chapter 3, one source line per row:
+    //   [ c + t*x*x     t*x*y + s*z   t*x*z - s*y ]
+    //   [ t*x*y - s*z   c + t*y*y     t*y*z + s*x ]
+    //   [ t*x*z + s*y   t*y*z - s*x   c + t*z*z   ]
+    M.E[0] = t*A.X*A.X + c;      M.E[1] = t*A.X*A.Y + s*A.Z;  M.E[2]  = t*A.X*A.Z - s*A.Y;
+    M.E[4] = t*A.X*A.Y - s*A.Z;  M.E[5] = t*A.Y*A.Y + c;      M.E[6]  = t*A.Y*A.Z + s*A.X;
+    M.E[8] = t*A.X*A.Z + s*A.Y;  M.E[9] = t*A.Y*A.Z - s*A.X;  M.E[10] = t*A.Z*A.Z + c;
 
     return(M);
 }
@@ -300,24 +331,25 @@ inline vec4 &operator-=(vec4 &A, vec4 B)   { A = A - B; return(A); }
 inline vec4 &operator*=(vec4 &A, real32 S) { A = A * S; return(A); }
 
 // -------------------------------------------------------------------------
-// Transforming a point by a matrix.  Each output component is one ROW of the
-// matrix dotted with the vector - and since storage is column-major, a row is
-// the four entries spaced four apart.
+// Transforming a vector by a matrix: v * M.  The result is a mix of M's rows,
+// with v's components as the amounts - X of row 0, plus Y of row 1, plus Z of
+// row 2, plus W of row 3.  So each output component is v dotted with one
+// COLUMN of M.
 //
 // NOTE(yigit): W decides whether translation applies.  W = 1 means "this is a
-// position", so the fourth column (E[12..14]) is added in.  W = 0 means "this
+// position", so the bottom row (E[12..14]) is added in.  W = 0 means "this
 // is a direction", and translation drops out - which is what you want for
 // normals and velocities, since moving something shouldn't rotate which way
 // it faces.
 // -------------------------------------------------------------------------
 inline vec4
-operator*(mat4 M, vec4 V)
+operator*(vec4 V, mat4 M)
 {
     vec4 Result;
-    Result.X = M.E[0]*V.X + M.E[4]*V.Y + M.E[8] *V.Z + M.E[12]*V.W;
-    Result.Y = M.E[1]*V.X + M.E[5]*V.Y + M.E[9] *V.Z + M.E[13]*V.W;
-    Result.Z = M.E[2]*V.X + M.E[6]*V.Y + M.E[10]*V.Z + M.E[14]*V.W;
-    Result.W = M.E[3]*V.X + M.E[7]*V.Y + M.E[11]*V.Z + M.E[15]*V.W;
+    Result.X = V.X*M.E[0] + V.Y*M.E[4] + V.Z*M.E[8]  + V.W*M.E[12];
+    Result.Y = V.X*M.E[1] + V.Y*M.E[5] + V.Z*M.E[9]  + V.W*M.E[13];
+    Result.Z = V.X*M.E[2] + V.Y*M.E[6] + V.Z*M.E[10] + V.W*M.E[14];
+    Result.W = V.X*M.E[3] + V.Y*M.E[7] + V.Z*M.E[11] + V.W*M.E[15];
     return(Result);
 }
 
@@ -346,15 +378,18 @@ Cross(vec3 A, vec3 B)
 // View matrix from a camera position, a point to look at, and which way is up.
 // The equivalent of glm::lookAt.
 //
-// It builds two things and multiplies them: a rotation whose ROWS are the
-// camera's own axes, and a translation by -Eye.  Rows rather than columns
-// because the view matrix is the INVERSE of the camera's transform - it moves
-// the world in front of a fixed eye at the origin, rather than moving a
-// camera.  For an inverse rotation, transposing is all it takes.
+// The camera's own world transform would have its axes (right, up, backward)
+// as its ROWS and Eye as its bottom row - that is what placing the camera in
+// the world means.  The view matrix is the INVERSE of that: it moves the
+// whole world in front of a fixed eye at the origin.  Inverting a rotation
+// is just transposing it, so the camera's axes become the COLUMNS here; and
+// undoing the move turns Eye into -Eye dotted with each axis, in the bottom
+// row.
 //
 // NOTE(yigit): F points BACKWARD, from the target toward the eye, because
 // this right-handed camera looks down -Z.  This is why Eye - Target rather than the
 // other way round, and it is the sign that catches everybody.
+// Same as XMMatrixLookAtRH.
 // -------------------------------------------------------------------------
 inline mat4
 Mat4LookAt(vec3 Eye, vec3 Target, vec3 Up)
@@ -365,10 +400,14 @@ Mat4LookAt(vec3 Eye, vec3 Target, vec3 Up)
 
     mat4 M = Mat4Identity();
 
-    // Column-major: E[Col*4 + Row], so a ROW is four entries spaced 4 apart.
-    M.E[0] = R.X;  M.E[4] = R.Y;  M.E[8]  = R.Z;  M.E[12] = -Dot(R, Eye);
-    M.E[1] = U.X;  M.E[5] = U.Y;  M.E[9]  = U.Z;  M.E[13] = -Dot(U, Eye);
-    M.E[2] = F.X;  M.E[6] = F.Y;  M.E[10] = F.Z;  M.E[14] = -Dot(F, Eye);
+    //   [ R.X       U.X       F.X       0 ]
+    //   [ R.Y       U.Y       F.Y       0 ]
+    //   [ R.Z       U.Z       F.Z       0 ]
+    //   [ -R.Eye    -U.Eye    -F.Eye    1 ]
+    M.E[0]  = R.X;           M.E[1]  = U.X;           M.E[2]  = F.X;
+    M.E[4]  = R.Y;           M.E[5]  = U.Y;           M.E[6]  = F.Y;
+    M.E[8]  = R.Z;           M.E[9]  = U.Z;           M.E[10] = F.Z;
+    M.E[12] = -Dot(R, Eye);  M.E[13] = -Dot(U, Eye);  M.E[14] = -Dot(F, Eye);
 
     return(M);
 }

@@ -1,13 +1,15 @@
 #if !defined(GAME_H)
 /*
   NOTE(yigit): The game layer's own types - game_state, and the headers it
-  is built from.  Platform-independent - no windows.h here.  (The renderer
-  below it is not: DirectX 12 only exists on Windows.)
+  is built from.  The game code itself never calls Windows - but windows.h
+  does arrive here, by way of SimpleMath (see game_directx_math.h), and the
+  renderer below it needs it anyway: DirectX 12 only exists on Windows.
 */
 
 #include "platform.h"
 #include "arena.h"
 #include "game_math.h"
+#include "game_directx_math.h"      // Luna's maths, and the bridge to ours
 #include "game_camera.h"
 #include "game_sound.h"
 
