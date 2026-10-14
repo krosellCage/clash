@@ -7,32 +7,21 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef int8_t   int8;
-typedef int16_t  int16;
-typedef int32_t  int32;
-typedef int64_t  int64;
+typedef int8_t   i8;
+typedef int16_t  i16;
+typedef int32_t  i32;
+typedef int64_t  i64;
 
-typedef uint8_t  uint8;
-typedef uint16_t uint16;
-typedef uint32_t uint32;
-typedef uint64_t uint64;
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
 
-typedef float    real32;
-typedef double   real64;
+typedef float    r32;
+typedef double   r64;
 
-typedef int8 i8;
-typedef int16 i16;
-typedef int32 i32;
-typedef int64 i64;
-typedef uint8 u8;
-typedef uint16 u16;
-typedef uint32 u32;
-typedef uint64 u64;
-
-typedef real32 r32;
-typedef real64 r64;
 // A 32-bit truth value.  Same size as the Win32 BOOL, so they convert freely.
-typedef int32    bool32;
+typedef i32      b32;
 
 // A size or an offset in bytes - 64 bits on a 64-bit build.
 typedef size_t   memory_index;
@@ -63,11 +52,11 @@ typedef size_t   memory_index;
 #define InvalidCodePath Assert(!"InvalidCodePath")
 #define InvalidDefaultCase default: {InvalidCodePath;} break
 
-inline uint32
-SafeTruncateUInt64(uint64 Value)
+inline u32
+SafeTruncateUInt64(u64 Value)
 {
     Assert(Value <= 0xFFFFFFFF);
-    uint32 Result = (uint32)Value;
+    u32 Result = (u32)Value;
     return(Result);
 }
 

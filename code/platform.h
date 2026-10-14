@@ -25,7 +25,7 @@ extern "C" {
 // so adding threading later does not mean changing every call.
 typedef struct thread_context
 {
-    int32 Placeholder;
+    i32 Placeholder;
 } thread_context;
 
 /*
@@ -38,7 +38,7 @@ typedef struct thread_context
 */
 typedef struct debug_read_file_result
 {
-    uint32 ContentsSize;
+    u32 ContentsSize;
     void *Contents;
 } debug_read_file_result;
 
@@ -48,7 +48,7 @@ typedef DEBUG_PLATFORM_FREE_FILE_MEMORY(debug_platform_free_file_memory);
 #define DEBUG_PLATFORM_READ_ENTIRE_FILE(name) debug_read_file_result name(thread_context *Thread, const char *Filename)
 typedef DEBUG_PLATFORM_READ_ENTIRE_FILE(debug_platform_read_entire_file);
 
-#define DEBUG_PLATFORM_WRITE_ENTIRE_FILE(name) bool32 name(thread_context *Thread, const char *Filename, uint32 MemorySize, void *Memory)
+#define DEBUG_PLATFORM_WRITE_ENTIRE_FILE(name) b32 name(thread_context *Thread, const char *Filename, u32 MemorySize, void *Memory)
 typedef DEBUG_PLATFORM_WRITE_ENTIRE_FILE(debug_platform_write_entire_file);
 
 // So the game can report errors without knowing what OutputDebugStringA is.
@@ -58,7 +58,7 @@ typedef DEBUG_PLATFORM_LOG(debug_platform_log);
 
 // Opaque timestamp - the game only ever compares it for equality, so the
 // platform can pack whatever it likes into it.  0 if the file is not there.
-#define DEBUG_PLATFORM_GET_FILE_WRITE_TIME(name) uint64 name(thread_context *Thread, const char *Filename)
+#define DEBUG_PLATFORM_GET_FILE_WRITE_TIME(name) u64 name(thread_context *Thread, const char *Filename)
 typedef DEBUG_PLATFORM_GET_FILE_WRITE_TIME(debug_platform_get_file_write_time);
 #endif
 
@@ -70,10 +70,10 @@ typedef struct game_button_state
     // How many times the button changed - down or up - during the frame.
     // Usually 0 or 1; 2 means it was pressed AND released within one frame,
     // a tap too quick for EndedDown alone to ever show.
-    int32 HalfTransitionCount;
+    i32 HalfTransitionCount;
 
     // Held when the frame ended.
-    bool32 EndedDown;
+    b32 EndedDown;
 } game_button_state;
 
 typedef struct game_controller_input
@@ -119,28 +119,28 @@ typedef struct game_input
 
     // Where the cursor is inside the window, in pixels from the top-left.
     // In camera mode it is pinned to the centre, so these are the centre.
-    int32 MouseX, MouseY;
+    i32 MouseX, MouseY;
 
     // How far the mouse physically moved this frame, in raw counts - what a
     // camera should turn by.  Unaffected by pointer acceleration or the
     // screen's edges.
-    int32 MouseDeltaX, MouseDeltaY;
+    i32 MouseDeltaX, MouseDeltaY;
 
     // Wheel notches this frame: positive away from you.
-    int32 MouseZ;
+    i32 MouseZ;
 
     // Tab toggles it.  False: the cursor is hidden and pinned, and the mouse
     // is for turning a camera.  True: the cursor is visible and free, for
     // pointing at things.
-    bool32 CursorFree;
+    b32 CursorFree;
 
     // How long the last frame took, in seconds.
-    real32 dtForFrame;
+    r32 dtForFrame;
 
     // The window's inner size.  The renderer resizes its swapchain when it
     // changes, and the projection matrix takes its aspect ratio from it.
-    int32 WindowWidth;
-    int32 WindowHeight;
+    i32 WindowWidth;
+    i32 WindowHeight;
 } game_input;
 
 /*
@@ -149,14 +149,14 @@ typedef struct game_input
 */
 typedef struct game_sound_output_buffer
 {
-    int32 SamplesPerSecond;
+    i32 SamplesPerSecond;
 
     // How many to write - in FRAMES: one frame is a left and a right sample.
-    int32 SampleCount;
+    i32 SampleCount;
 
     // Where to write them: SampleCount pairs of 16-bit samples, left then
     // right, back to back.
-    int16 *Samples;
+    i16 *Samples;
 } game_sound_output_buffer;
 
 /*
@@ -165,14 +165,14 @@ typedef struct game_sound_output_buffer
 */
 typedef struct game_memory
 {
-    bool32 IsInitialized;
+    b32 IsInitialized;
 
     // Everything that must last - game_state first, then WorldArena.
-    uint64 PermanentStorageSize;
+    u64 PermanentStorageSize;
     void *PermanentStorage;             // NOTE(yigit): REQUIRED to be cleared to zero at startup
 
     // Scratch - model parsing and the like.  Reset before each use.
-    uint64 TransientStorageSize;
+    u64 TransientStorageSize;
     void *TransientStorage;             // NOTE(yigit): REQUIRED to be cleared to zero at startup
 
     /*
@@ -184,7 +184,7 @@ typedef struct game_memory
       the save would be forgotten while it still exists.  Kept apart, the
       renderer simply carries on through a loop.
     */
-    uint64 RendererStorageSize;
+    u64 RendererStorageSize;
     void *RendererStorage;              // NOTE(yigit): REQUIRED to be cleared to zero at startup
 
     // The window, as the platform's own handle - an HWND on Windows.  Opaque
@@ -230,10 +230,10 @@ static_assert((offsetof(game_controller_input, Terminator) / sizeof(game_button_
 
 // Went down during this frame - one frame per press, not every frame while
 // held.  For toggles ("press F to...") rather than movement.
-inline bool32
+inline b32
 WasPressed(game_button_state Button)
 {
-    bool32 Result = ((Button.HalfTransitionCount > 1) ||
+    b32 Result = ((Button.HalfTransitionCount > 1) ||
                      ((Button.HalfTransitionCount == 1) && Button.EndedDown));
     return(Result);
 }

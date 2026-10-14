@@ -29,12 +29,12 @@
 // names directly.  These were the only two ever used from the old intrinsics
 // header, so they live here now.
 // TODO(yigit): Implement these ourselves and drop math.h entirely.
-inline real32 Sin(real32 Angle) { return(sinf(Angle)); }
-inline real32 Cos(real32 Angle) { return(cosf(Angle)); }
+inline r32 Sin(r32 Angle) { return(sinf(Angle)); }
+inline r32 Cos(r32 Angle) { return(cosf(Angle)); }
 
 struct mat4
 {
-    real32 E[16]; // row-major: E[Row*4 + Col]
+    r32 E[16]; // row-major: E[Row*4 + Col]
 };
 
 inline mat4
@@ -56,7 +56,7 @@ Mat4Mul(mat4 A, mat4 B)
     {
         for(int Col = 0; Col < 4; ++Col)
         {
-            real32 Sum = 0;
+            r32 Sum = 0;
             for(int K = 0; K < 4; ++K)
             {
                 Sum += A.E[Row*4 + K] * B.E[K*4 + Col];
@@ -87,10 +87,10 @@ inline mat4 operator*(mat4 A, mat4 B) { return(Mat4Mul(A, B)); }
   silently vanish.  Same as XMMatrixPerspectiveFovRH.
 */
 inline mat4
-Mat4Perspective(real32 FovYRadians, real32 Aspect, real32 Near, real32 Far)
+Mat4Perspective(r32 FovYRadians, r32 Aspect, r32 Near, r32 Far)
 {
     mat4 M = {};
-    real32 F = 1.0f / tanf(FovYRadians * 0.5f);
+    r32 F = 1.0f / tanf(FovYRadians * 0.5f);
     M.E[0]  =  F / Aspect;
     M.E[5]  =  F;
     M.E[10] = Far / (Near - Far);           M.E[11] = -1.0f;
@@ -122,8 +122,8 @@ Mat4Perspective(real32 FovYRadians, real32 Aspect, real32 Near, real32 Far)
   and DirectX's own viewport, count pixels.
 */
 inline mat4
-Mat4Ortho(real32 Left, real32 Right, real32 Bottom, real32 Top,
-          real32 Near, real32 Far)
+Mat4Ortho(r32 Left, r32 Right, r32 Bottom, r32 Top,
+          r32 Near, r32 Far)
 {
     mat4 M = {};
 
@@ -151,7 +151,7 @@ Mat4Ortho(real32 Left, real32 Right, real32 Bottom, real32 Top,
 // A point has W = 1, so v * M adds X, Y, Z to it.  A direction has W = 0,
 // and is not moved.
 inline mat4
-Mat4Translation(real32 X, real32 Y, real32 Z)
+Mat4Translation(r32 X, r32 Y, r32 Z)
 {
     mat4 M = Mat4Identity();
     M.E[12] = X;
@@ -162,7 +162,7 @@ Mat4Translation(real32 X, real32 Y, real32 Z)
 
 // Scale matrix - the diagonal, so each axis is multiplied independently
 inline mat4
-Mat4Scale(real32 X, real32 Y, real32 Z)
+Mat4Scale(r32 X, r32 Y, r32 Z)
 {
     mat4 M = Mat4Identity();
     M.E[0]  = X;
@@ -176,11 +176,11 @@ Mat4Scale(real32 X, real32 Y, real32 Z)
 // being rotated around keeps its own row untouched.  Same as
 // XMMatrixRotationX/Y/Z.
 inline mat4
-Mat4RotationX(real32 Angle)
+Mat4RotationX(r32 Angle)
 {
     mat4 M = Mat4Identity();
-    real32 c = cosf(Angle);
-    real32 s = sinf(Angle);
+    r32 c = cosf(Angle);
+    r32 s = sinf(Angle);
 
     // [ 1  0   0   0 ]
     // [ 0  c   s   0 ]
@@ -192,11 +192,11 @@ Mat4RotationX(real32 Angle)
 }
 
 inline mat4
-Mat4RotationY(real32 Angle)
+Mat4RotationY(r32 Angle)
 {
     mat4 M = Mat4Identity();
-    real32 c = cosf(Angle);
-    real32 s = sinf(Angle);
+    r32 c = cosf(Angle);
+    r32 s = sinf(Angle);
 
     // [ c  0  -s   0 ]
     // [ 0  1   0   0 ]
@@ -208,11 +208,11 @@ Mat4RotationY(real32 Angle)
 }
 
 inline mat4
-Mat4RotationZ(real32 Angle)
+Mat4RotationZ(r32 Angle)
 {
     mat4 M = Mat4Identity();
-    real32 c = cosf(Angle);
-    real32 s = sinf(Angle);
+    r32 c = cosf(Angle);
+    r32 s = sinf(Angle);
 
     // [ c  s   0   0 ]
     // [-s  c   0   0 ]
@@ -227,11 +227,11 @@ Mat4RotationZ(real32 Angle)
 // operators until something actually needs one.
 struct vec2
 {
-    real32 X, Y;
+    r32 X, Y;
 };
 
 inline vec2
-Vec2(real32 X, real32 Y)
+Vec2(r32 X, r32 Y)
 {
     vec2 Result = {X, Y};
     return(Result);
@@ -239,12 +239,12 @@ Vec2(real32 X, real32 Y)
 
 struct vec3
 {
-    real32 X, Y, Z;
+    r32 X, Y, Z;
 };
 
 // Forward declarations - Mat4RotationAxis below needs these, and they are
 // defined further down with the rest of the vector maths.
-inline vec3 Vec3(real32 X, real32 Y, real32 Z);
+inline vec3 Vec3(r32 X, r32 Y, r32 Z);
 inline vec3 Normalize(vec3 A);
 
 // Rotation about any axis (Rodrigues' formula).  This is the general case -
@@ -255,14 +255,14 @@ inline vec3 Normalize(vec3 A);
 // like (0.5, 1, 0) without worrying about its length.  GLM's rotate does the
 // same.  A zero-length axis yields the identity rather than NaNs.
 inline mat4
-Mat4RotationAxis(vec3 Axis, real32 Angle)
+Mat4RotationAxis(vec3 Axis, r32 Angle)
 {
     mat4 M = Mat4Identity();
 
     vec3 A = Normalize(Axis);
-    real32 c = cosf(Angle);
-    real32 s = sinf(Angle);
-    real32 t = 1.0f - c;
+    r32 c = cosf(Angle);
+    r32 s = sinf(Angle);
+    r32 t = 1.0f - c;
 
     // As in Luna chapter 3, one source line per row:
     //   [ c + t*x*x     t*x*y + s*z   t*x*z - s*y ]
@@ -276,7 +276,7 @@ Mat4RotationAxis(vec3 Axis, real32 Angle)
 }
 
 inline vec3
-Vec3(real32 X, real32 Y, real32 Z)
+Vec3(r32 X, r32 Y, r32 Z)
 {
     vec3 Result = {X, Y, Z};
     return(Result);
@@ -284,11 +284,11 @@ Vec3(real32 X, real32 Y, real32 Z)
 
 struct vec4
 {
-    real32 X, Y, Z, W;
+    r32 X, Y, Z, W;
 };
 
 inline vec4
-Vec4(real32 X, real32 Y, real32 Z, real32 W)
+Vec4(r32 X, r32 Y, r32 Z, r32 W)
 {
     vec4 Result = {X, Y, Z, W};
     return(Result);
@@ -296,7 +296,7 @@ Vec4(real32 X, real32 Y, real32 Z, real32 W)
 
 // NOTE(yigit): Mirrors GLSL's vec4(someVec3, w).
 inline vec4
-Vec4(vec3 XYZ, real32 W)
+Vec4(vec3 XYZ, r32 W)
 {
     vec4 Result = {XYZ.X, XYZ.Y, XYZ.Z, W};
     return(Result);
@@ -308,13 +308,13 @@ Vec4(vec3 XYZ, real32 W)
 inline vec3 operator-(vec3 A)              { return(Vec3(-A.X, -A.Y, -A.Z)); }
 inline vec3 operator+(vec3 A, vec3 B)      { return(Vec3(A.X + B.X, A.Y + B.Y, A.Z + B.Z)); }
 inline vec3 operator-(vec3 A, vec3 B)      { return(Vec3(A.X - B.X, A.Y - B.Y, A.Z - B.Z)); }
-inline vec3 operator*(vec3 A, real32 S)    { return(Vec3(A.X * S, A.Y * S, A.Z * S)); }
-inline vec3 operator*(real32 S, vec3 A)    { return(Vec3(A.X * S, A.Y * S, A.Z * S)); }
-inline vec3 operator/(vec3 A, real32 S)    { return(Vec3(A.X / S, A.Y / S, A.Z / S)); }
+inline vec3 operator*(vec3 A, r32 S)    { return(Vec3(A.X * S, A.Y * S, A.Z * S)); }
+inline vec3 operator*(r32 S, vec3 A)    { return(Vec3(A.X * S, A.Y * S, A.Z * S)); }
+inline vec3 operator/(vec3 A, r32 S)    { return(Vec3(A.X / S, A.Y / S, A.Z / S)); }
 
 inline vec3 &operator+=(vec3 &A, vec3 B)   { A = A + B; return(A); }
 inline vec3 &operator-=(vec3 &A, vec3 B)   { A = A - B; return(A); }
-inline vec3 &operator*=(vec3 &A, real32 S) { A = A * S; return(A); }
+inline vec3 &operator*=(vec3 &A, r32 S) { A = A * S; return(A); }
 
 // -------------------------------------------------------------------------
 // vec4 operators
@@ -322,13 +322,13 @@ inline vec3 &operator*=(vec3 &A, real32 S) { A = A * S; return(A); }
 inline vec4 operator-(vec4 A)              { return(Vec4(-A.X, -A.Y, -A.Z, -A.W)); }
 inline vec4 operator+(vec4 A, vec4 B)      { return(Vec4(A.X + B.X, A.Y + B.Y, A.Z + B.Z, A.W + B.W)); }
 inline vec4 operator-(vec4 A, vec4 B)      { return(Vec4(A.X - B.X, A.Y - B.Y, A.Z - B.Z, A.W - B.W)); }
-inline vec4 operator*(vec4 A, real32 S)    { return(Vec4(A.X * S, A.Y * S, A.Z * S, A.W * S)); }
-inline vec4 operator*(real32 S, vec4 A)    { return(Vec4(A.X * S, A.Y * S, A.Z * S, A.W * S)); }
-inline vec4 operator/(vec4 A, real32 S)    { return(Vec4(A.X / S, A.Y / S, A.Z / S, A.W / S)); }
+inline vec4 operator*(vec4 A, r32 S)    { return(Vec4(A.X * S, A.Y * S, A.Z * S, A.W * S)); }
+inline vec4 operator*(r32 S, vec4 A)    { return(Vec4(A.X * S, A.Y * S, A.Z * S, A.W * S)); }
+inline vec4 operator/(vec4 A, r32 S)    { return(Vec4(A.X / S, A.Y / S, A.Z / S, A.W / S)); }
 
 inline vec4 &operator+=(vec4 &A, vec4 B)   { A = A + B; return(A); }
 inline vec4 &operator-=(vec4 &A, vec4 B)   { A = A - B; return(A); }
-inline vec4 &operator*=(vec4 &A, real32 S) { A = A * S; return(A); }
+inline vec4 &operator*=(vec4 &A, r32 S) { A = A * S; return(A); }
 
 // -------------------------------------------------------------------------
 // Transforming a vector by a matrix: v * M.  The result is a mix of M's rows,
@@ -359,8 +359,8 @@ operator*(vec4 V, mat4 M)
 
 // Sum of componentwise products.  For unit vectors this is the cosine of the
 // angle between them: 1 means same direction, 0 perpendicular, -1 opposite.
-inline real32 Dot(vec3 A, vec3 B) { return(A.X*B.X + A.Y*B.Y + A.Z*B.Z); }
-inline real32 Dot(vec4 A, vec4 B) { return(A.X*B.X + A.Y*B.Y + A.Z*B.Z + A.W*B.W); }
+inline r32 Dot(vec3 A, vec3 B) { return(A.X*B.X + A.Y*B.Y + A.Z*B.Z); }
+inline r32 Dot(vec4 A, vec4 B) { return(A.X*B.X + A.Y*B.Y + A.Z*B.Z + A.W*B.W); }
 
 // A vector perpendicular to both inputs.  Order matters - Cross(A, B) points
 // the opposite way from Cross(B, A).  Only meaningful in 3D.
@@ -414,11 +414,11 @@ Mat4LookAt(vec3 Eye, vec3 Target, vec3 Up)
 
 // NOTE(yigit): Squared length skips the square root.  Use it whenever you are
 // only comparing distances - "is A nearer than B" needs no sqrt.
-inline real32 LengthSq(vec3 A) { return(Dot(A, A)); }
-inline real32 LengthSq(vec4 A) { return(Dot(A, A)); }
+inline r32 LengthSq(vec3 A) { return(Dot(A, A)); }
+inline r32 LengthSq(vec4 A) { return(Dot(A, A)); }
 
-inline real32 Length(vec3 A) { return(sqrtf(LengthSq(A))); }
-inline real32 Length(vec4 A) { return(sqrtf(LengthSq(A))); }
+inline r32 Length(vec3 A) { return(sqrtf(LengthSq(A))); }
+inline r32 Length(vec4 A) { return(sqrtf(LengthSq(A))); }
 
 // NOTE(yigit): Returns a zero vector rather than NaNs if the input has no
 // length.  A NaN silently poisons every later calculation and is miserable to
@@ -427,7 +427,7 @@ inline vec3
 Normalize(vec3 A)
 {
     vec3 Result = {};
-    real32 Len = Length(A);
+    r32 Len = Length(A);
     if(Len > 0.0f)
     {
         Result = A / Len;
@@ -439,7 +439,7 @@ inline vec4
 Normalize(vec4 A)
 {
     vec4 Result = {};
-    real32 Len = Length(A);
+    r32 Len = Length(A);
     if(Len > 0.0f)
     {
         Result = A / Len;
@@ -451,13 +451,13 @@ Normalize(vec4 A)
 // (so movement stays on the ground plane even while looking up/down).
 // Yaw = 0 looks down -Z, consistent with Mat4RotationY below.
 inline vec3
-CameraForward(real32 Yaw)
+CameraForward(r32 Yaw)
 {
     return Vec3(-sinf(Yaw), 0.0f, -cosf(Yaw));
 }
 
 inline vec3
-CameraRight(real32 Yaw)
+CameraRight(r32 Yaw)
 {
     return Vec3(cosf(Yaw), 0.0f, -sinf(Yaw));
 }

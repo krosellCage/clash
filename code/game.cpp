@@ -66,11 +66,11 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         // memory game_state is already using.
         InitializeArena(&State->WorldArena,
                         (memory_index)(Memory->PermanentStorageSize - sizeof(game_state)),
-                        (uint8 *)Memory->PermanentStorage + sizeof(game_state));
+                        (u8 *)Memory->PermanentStorage + sizeof(game_state));
 
         InitializeArena(&State->TransientArena,
                         (memory_index)Memory->TransientStorageSize,
-                        (uint8 *)Memory->TransientStorage);
+                        (u8 *)Memory->TransientStorage);
 
         // NOTE(yigit): The storage starts zeroed, so every camera field would
         // be 0 - and a zero-length Front makes the view matrix degenerate.
@@ -93,18 +93,18 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // Input
     // ------------------------------------------------------------------
     game_controller_input *Keyboard = &Input->Keyboard;
-    real32 DeltaTime = Input->dtForFrame;
+    r32 DeltaTime = Input->dtForFrame;
 
     // The mouse turns the camera - but not in cursor mode (Tab), where it is
     // pointing at things instead.
     if(!Input->CursorFree)
     {
         CameraProcessMouseLook(&State->Camera,
-                               (real32)Input->MouseDeltaX,
-                               (real32)Input->MouseDeltaY);
+                               (r32)Input->MouseDeltaX,
+                               (r32)Input->MouseDeltaY);
     }
 
-    CameraProcessZoom(&State->Camera, (real32)Input->MouseZ);
+    CameraProcessZoom(&State->Camera, (r32)Input->MouseZ);
 
     // Held keys: move every frame they are down, by speed times dt.
     if(Keyboard->MoveUp.EndedDown)    { CameraProcessMovement(&State->Camera, CameraMovement_Forward,  DeltaTime); }
@@ -147,10 +147,10 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     // NOTE(yigit): Guard the divide - a minimised window reports height 0,
     // which would make Aspect infinite and fill the matrix with NaNs.
-    real32 Aspect = 1.0f;
+    r32 Aspect = 1.0f;
     if(Input->WindowHeight > 0)
     {
-        Aspect = (real32)Input->WindowWidth / (real32)Input->WindowHeight;
+        Aspect = (r32)Input->WindowWidth / (r32)Input->WindowHeight;
     }
 
     State->View = CameraGetViewMatrix(&State->Camera);

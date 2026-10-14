@@ -16,7 +16,7 @@
 struct memory_arena
 {
     memory_index Size;
-    uint8 *Base;
+    u8 *Base;
     memory_index Used;
 };
 
@@ -24,7 +24,7 @@ struct memory_arena
 // sits in, so its Size is 0 and the first push would assert.  Every arena
 // has to be handed its block explicitly first.
 internal void
-InitializeArena(memory_arena *Arena, memory_index Size, uint8 *Base)
+InitializeArena(memory_arena *Arena, memory_index Size, u8 *Base)
 {
     Arena->Size = Size;
     Arena->Used = 0;
@@ -63,7 +63,7 @@ GetAlignmentOffset(memory_arena *Arena, memory_index Alignment)
 
     PushStruct(Arena, thing)         16
     PushStruct(Arena, thing, 64)     64 - a cache line
-    PushArray(Arena, 100, int16, 2)  2  - for packing small things tightly
+    PushArray(Arena, 100, i16, 2)  2  - for packing small things tightly
 
   NOTE(yigit): 16 because that is what the SSE types need - XMVECTOR and
   XMMATRIX are loaded with instructions that crash on an address that is not

@@ -44,12 +44,12 @@ struct camera
     vec3 Right;
     vec3 WorldUp;   // which way is up in the world; never changes
 
-    real32 Yaw;
-    real32 Pitch;
+    r32 Yaw;
+    r32 Pitch;
 
-    real32 MovementSpeed;
-    real32 MouseSensitivity;
-    real32 Zoom;    // vertical FOV, for Mat4Perspective
+    r32 MovementSpeed;
+    r32 MouseSensitivity;
+    r32 Zoom;       // vertical FOV, for Mat4Perspective
 };
 
 // Rebuilds Front/Right/Up from Yaw and Pitch.  Everything that changes an
@@ -100,9 +100,9 @@ CameraGetViewMatrix(camera *Camera)
 // DeltaTime scales the step so the camera covers the same ground per second
 // whatever the frame rate.
 internal void
-CameraProcessMovement(camera *Camera, camera_movement Direction, real32 DeltaTime)
+CameraProcessMovement(camera *Camera, camera_movement Direction, r32 DeltaTime)
 {
-    real32 Velocity = Camera->MovementSpeed * DeltaTime;
+    r32 Velocity = Camera->MovementSpeed * DeltaTime;
 
     switch(Direction)
     {
@@ -117,7 +117,7 @@ CameraProcessMovement(camera *Camera, camera_movement Direction, real32 DeltaTim
 // negated inside because screen Y grows downward, while pushing the mouse up
 // should raise the pitch.
 internal void
-CameraProcessMouseLook(camera *Camera, real32 DeltaX, real32 DeltaY)
+CameraProcessMouseLook(camera *Camera, r32 DeltaX, r32 DeltaY)
 {
     Camera->Yaw += DeltaX * Camera->MouseSensitivity;
     Camera->Pitch -= DeltaY * Camera->MouseSensitivity;
@@ -140,12 +140,12 @@ CameraProcessMouseLook(camera *Camera, real32 DeltaX, real32 DeltaY)
 // The mouse wheel narrows or widens the field of view.  DeltaZ is in whole
 // notches (Input->MouseZ).
 internal void
-CameraProcessZoom(camera *Camera, real32 DeltaZ)
+CameraProcessZoom(camera *Camera, r32 DeltaZ)
 {
     Camera->Zoom -= DeltaZ * (1.0f*Pi32 / 180.0f);
 
-    real32 MinZoom = 1.0f*Pi32 / 180.0f;
-    real32 MaxZoom = 45.0f*Pi32 / 180.0f;
+    r32 MinZoom = 1.0f*Pi32 / 180.0f;
+    r32 MaxZoom = 45.0f*Pi32 / 180.0f;
     if(Camera->Zoom < MinZoom) { Camera->Zoom = MinZoom; }
     if(Camera->Zoom > MaxZoom) { Camera->Zoom = MaxZoom; }
 }

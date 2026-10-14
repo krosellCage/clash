@@ -22,7 +22,7 @@ struct game_state
     // rather than read off a clock.  dtForFrame travels inside game_input,
     // which input recording saves every frame, so time built this way plays
     // back exactly.
-    real32 TimeSeconds;
+    r32 TimeSeconds;
 
     // NOTE(yigit): By value, in PermanentStorage - so it survives a DLL
     // reload, and input playback puts it back where the loop started.
@@ -35,10 +35,10 @@ struct game_state
 
     // Sound.  Space toggles it.  Plays data\music.wav if there is one, and
     // a quiet test tone if not - so there is always something to hear.
-    bool32 SoundOn;
+    b32 SoundOn;
     loaded_sound Music;         // samples in WorldArena
-    uint32 MusicPlayCursor;     // which frame of Music plays next
-    real32 TonePhase;           // where the test tone's sine wave is, 0..2pi
+    u32 MusicPlayCursor;        // which frame of Music plays next
+    r32 TonePhase;              // where the test tone's sine wave is, 0..2pi
 
     // NOTE(yigit): An INCOMPLETE type, and only ever a pointer - into
     // RendererStorage, not into this block (see game_memory).  The game can

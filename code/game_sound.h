@@ -23,10 +23,10 @@
 #include "arena.h"
 #include "game_math.h"
 
-// Packs four characters into the uint32 that RIFF actually stores.  Little
+// Packs four characters into the u32 that RIFF actually stores.  Little
 // endian, so the first character occupies the lowest byte.
-#define RIFF_CODE(a, b, c, d) (((uint32)(a) << 0) | ((uint32)(b) << 8) | \
-                               ((uint32)(c) << 16) | ((uint32)(d) << 24))
+#define RIFF_CODE(a, b, c, d) (((u32)(a) << 0) | ((u32)(b) << 8) | \
+                               ((u32)(c) << 16) | ((u32)(d) << 24))
 
 enum
 {
@@ -42,25 +42,25 @@ enum
 #pragma pack(push, 1)
 struct wave_header
 {
-    uint32 RIFFID;
-    uint32 Size;
-    uint32 WAVEID;
+    u32 RIFFID;
+    u32 Size;
+    u32 WAVEID;
 };
 
 struct wave_chunk_header
 {
-    uint32 ID;
-    uint32 Size;
+    u32 ID;
+    u32 Size;
 };
 
 struct wave_fmt
 {
-    uint16 FormatTag;
-    uint16 ChannelCount;
-    uint32 SamplesPerSecond;
-    uint32 AvgBytesPerSecond;
-    uint16 BlockAlign;
-    uint16 BitsPerSample;
+    u16 FormatTag;
+    u16 ChannelCount;
+    u32 SamplesPerSecond;
+    u32 AvgBytesPerSecond;
+    u16 BlockAlign;
+    u16 BitsPerSample;
     // Anything past here is optional and only present in extended headers.
 };
 #pragma pack(pop)
@@ -69,9 +69,9 @@ struct wave_fmt
 
 struct loaded_sound
 {
-    int16 *Samples;             // interleaved L,R,L,R - always stereo once loaded
-    uint32 SampleCount;         // frames, NOT individual int16s
-    uint32 SamplesPerSecond;
+    i16 *Samples;               // interleaved L,R,L,R - always stereo once loaded
+    u32 SampleCount;            // frames, NOT individual i16s
+    u32 SamplesPerSecond;
 };
 
 // Reads a 16-bit PCM WAV and copies its samples into Arena.  Returns a zeroed
@@ -94,8 +94,8 @@ LoadWAV(thread_context *Thread, game_memory *Memory, memory_arena *Arena,
         return(Result);
     }
 
-    uint8 *Start = (uint8 *)File.Contents;
-    uint8 *End = Start + File.ContentsSize;
+    u8 *Start = (u8 *)File.Contents;
+    u8 *End = Start + File.ContentsSize;
 
     if(File.ContentsSize < sizeof(wave_header))
     {
@@ -120,20 +120,20 @@ LoadWAV(thread_context *Thread, game_memory *Memory, memory_arena *Arena,
     // Walk the chunks.
     // ---------------------------------------------------------------------
     wave_fmt *Format = 0;
-    int16 *SourceSamples = 0;
-    uint32 SourceDataSize = 0;
+    i16 *SourceSamples = 0;
+    u32 SourceDataSize = 0;
 
-    uint8 *At = Start + sizeof(wave_header);
+    u8 *At = Start + sizeof(wave_header);
     while((At + sizeof(wave_chunk_header)) <= End)
     {
         wave_chunk_header *Chunk = (wave_chunk_header *)At;
-        uint8 *ChunkData = At + sizeof(wave_chunk_header);
+        u8 *ChunkData = At + sizeof(wave_chunk_header);
 
         // A truncated file would otherwise walk us off the end.
-        uint32 ChunkSize = Chunk->Size;
+        u32 ChunkSize = Chunk->Size;
         if((ChunkData + ChunkSize) > End)
         {
-            ChunkSize = (uint32)(End - ChunkData);
+            ChunkSize = (u32)(End - ChunkData);
         }
 
         if(Chunk->ID == WAVE_ChunkID_fmt)
@@ -145,7 +145,7 @@ LoadWAV(thread_context *Thread, game_memory *Memory, memory_arena *Arena,
         }
         else if(Chunk->ID == WAVE_ChunkID_data)
         {
-            SourceSamples = (int16 *)ChunkData;
+            SourceSamples = (i16 *)ChunkData;
             SourceDataSize = ChunkSize;
         }
 
@@ -180,12 +180,12 @@ LoadWAV(thread_context *Thread, game_memory *Memory, memory_arena *Arena,
     // ---------------------------------------------------------------------
     // Copy into the arena, widening mono to stereo as we go.
     // ---------------------------------------------------------------------
-    uint32 SourceChannels = Format->ChannelCount;
-    uint32 FrameCount = SourceDataSize / (uint32)(sizeof(int16) * SourceChannels);
+    u32 SourceChannels = Format->ChannelCount;
+    u32 FrameCount = SourceDataSize / (u32)(sizeof(i16) * SourceChannels);
 
-    int16 *Destination = PushArray(Arena, FrameCount * 2, int16);
+    i16 *Destination = PushArray(Arena, FrameCount * 2, i16);
 
-    for(uint32 FrameIndex = 0;
+    for(u32 FrameIndex = 0;
         FrameIndex < FrameCount;
         ++FrameIndex)
     {
@@ -197,7 +197,7 @@ LoadWAV(thread_context *Thread, game_memory *Memory, memory_arena *Arena,
         else
         {
             // Same sample to both ears.
-            int16 Mono = SourceSamples[FrameIndex];
+            i16 Mono = SourceSamples[FrameIndex];
             Destination[FrameIndex*2 + 0] = Mono;
             Destination[FrameIndex*2 + 1] = Mono;
         }
@@ -219,7 +219,7 @@ LoadWAV(thread_context *Thread, game_memory *Memory, memory_arena *Arena,
 internal void
 WriteSilence(game_sound_output_buffer *SoundBuffer)
 {
-    int16 *SampleOut = SoundBuffer->Samples;
+    i16 *SampleOut = SoundBuffer->Samples;
     for(int SampleIndex = 0;
         SampleIndex < SoundBuffer->SampleCount;
         ++SampleIndex)
@@ -236,7 +236,7 @@ WriteSilence(game_sound_output_buffer *SoundBuffer)
 // output rate it will play at the wrong pitch and speed - convert the file
 // instead.
 internal void
-PlaySoundLooping(loaded_sound *Sound, uint32 *PlayCursor,
+PlaySoundLooping(loaded_sound *Sound, u32 *PlayCursor,
                  game_sound_output_buffer *SoundBuffer)
 {
     if(!Sound->Samples || (Sound->SampleCount == 0))
@@ -245,8 +245,8 @@ PlaySoundLooping(loaded_sound *Sound, uint32 *PlayCursor,
         return;
     }
 
-    int16 *SampleOut = SoundBuffer->Samples;
-    uint32 Cursor = *PlayCursor;
+    i16 *SampleOut = SoundBuffer->Samples;
+    u32 Cursor = *PlayCursor;
     for(int SampleIndex = 0;
         SampleIndex < SoundBuffer->SampleCount;
         ++SampleIndex)
@@ -274,19 +274,19 @@ PlaySoundLooping(loaded_sound *Sound, uint32 *PlayCursor,
   at every buffer boundary, and a jump in a wave is a click you can hear.
 */
 internal void
-WriteTestTone(real32 *Phase, game_sound_output_buffer *SoundBuffer,
-              real32 Hz, real32 Volume)
+WriteTestTone(r32 *Phase, game_sound_output_buffer *SoundBuffer,
+              r32 Hz, r32 Volume)
 {
     // How far along the wave one sample moves: one full turn (2 pi) per
     // cycle, Hz cycles per second, SamplesPerSecond samples per second.
-    real32 Step = 2.0f*Pi32*Hz / (real32)SoundBuffer->SamplesPerSecond;
+    r32 Step = 2.0f*Pi32*Hz / (r32)SoundBuffer->SamplesPerSecond;
 
-    int16 *SampleOut = SoundBuffer->Samples;
-    for(int32 SampleIndex = 0;
+    i16 *SampleOut = SoundBuffer->Samples;
+    for(i32 SampleIndex = 0;
         SampleIndex < SoundBuffer->SampleCount;
         ++SampleIndex)
     {
-        int16 Value = (int16)(Sin(*Phase) * Volume * 32767.0f);
+        i16 Value = (i16)(Sin(*Phase) * Volume * 32767.0f);
         *SampleOut++ = Value;       // left
         *SampleOut++ = Value;       // right
 

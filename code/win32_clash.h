@@ -28,7 +28,7 @@ struct win32_game_code
     game_get_sound_samples *GetSoundSamples;
     game_shutdown *Shutdown;
 
-    bool32 IsValid;
+    b32 IsValid;
 };
 
 /*
@@ -42,20 +42,20 @@ struct win32_sound_output
 {
     // False when there is no sound device, or it would not start.  The game
     // runs on regardless, silently.
-    bool32 IsValid;
+    b32 IsValid;
 
     IAudioClient *AudioClient;
     IAudioRenderClient *RenderClient;
 
-    uint32 SamplesPerSecond;
+    u32 SamplesPerSecond;
 
     // Frames: one left and one right 16-bit sample - 4 bytes.
-    uint32 BufferSizeInFrames;      // the whole ring, as WASAPI made it
-    uint32 LatencyFrames;           // how full we keep it
+    u32 BufferSizeInFrames;         // the whole ring, as WASAPI made it
+    u32 LatencyFrames;              // how full we keep it
 
     // Where the game writes before it is copied into WASAPI's ring.  Big
     // enough for the whole ring, the most we could ever ask for at once.
-    int16 *Samples;
+    i16 *Samples;
 };
 
 #define WIN32_STATE_FILE_NAME_COUNT MAX_PATH
@@ -77,17 +77,17 @@ struct win32_state
 {
     // The permanent and transient storage, as one block - which is what
     // input recording saves and restores.
-    uint64 TotalSize;
+    u64 TotalSize;
     void *GameMemoryBlock;
 
     // NOTE(yigit): Slot 0 means "not recording", so real slots start at 1.
     win32_replay_buffer ReplayBuffers[4];
 
     HANDLE RecordingHandle;
-    int32 InputRecordingIndex;
+    i32 InputRecordingIndex;
 
     HANDLE PlaybackHandle;
-    int32 InputPlayingIndex;
+    i32 InputPlayingIndex;
 
     // The exe's own path, for building the paths of files next to it.
     char EXEFileName[WIN32_STATE_FILE_NAME_COUNT];

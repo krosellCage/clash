@@ -93,7 +93,7 @@ using Color      = DirectX::SimpleMath::Color;
 // NOTE(yigit): W is the one thing to think about.  0 for a direction, which
 // translation must not move; 1 for a position, which it must.
 inline XMVECTOR XM_CALLCONV
-XMLoadVec3(vec3 V, real32 W = 0.0f)
+XMLoadVec3(vec3 V, r32 W = 0.0f)
 {
     return(XMVectorSet(V.X, V.Y, V.Z, W));
 }

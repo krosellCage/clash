@@ -45,16 +45,16 @@
 // one.  The frame is already lost; this decides whether the camera is too.
 #define WIN32_MAX_FRAME_SECONDS 0.1f
 
-global_variable bool32 GlobalRunning;
-global_variable bool32 GlobalPause;
+global_variable b32 GlobalRunning;
+global_variable b32 GlobalPause;
 
 // Set by the window procedure.  The game sees the size through game_input
 // and resizes its swapchain itself.
-global_variable int32 GlobalClientWidth;
-global_variable int32 GlobalClientHeight;
+global_variable i32 GlobalClientWidth;
+global_variable i32 GlobalClientHeight;
 
 // Tab toggles it - see game_input::CursorFree.
-global_variable bool32 GlobalCursorFree;
+global_variable b32 GlobalCursorFree;
 
 // NOTE(yigit): Remembers where and how big the window was before going
 // fullscreen, so coming back restores it exactly - including whether it was
@@ -167,7 +167,7 @@ Win32SetWorkingDirectoryToProjectRoot(win32_state *State)
 
     // "C:\clash\build\clash.exe" - cut after the last two backslashes, which
     // leaves "C:\clash".
-    for(int32 Cut = 0; Cut < 2; ++Cut)
+    for(i32 Cut = 0; Cut < 2; ++Cut)
     {
         char *LastSlash = 0;
         for(char *At = Path; *At; ++At)
@@ -217,7 +217,7 @@ DEBUG_PLATFORM_READ_ENTIRE_FILE(DEBUGPlatformReadEntireFile)
         LARGE_INTEGER FileSize;
         if(GetFileSizeEx(FileHandle, &FileSize))
         {
-            uint32 FileSize32 = SafeTruncateUInt64((uint64)FileSize.QuadPart);
+            u32 FileSize32 = SafeTruncateUInt64((u64)FileSize.QuadPart);
             Result.Contents = VirtualAlloc(0, FileSize32, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
             if(Result.Contents)
             {
@@ -243,7 +243,7 @@ DEBUG_PLATFORM_READ_ENTIRE_FILE(DEBUGPlatformReadEntireFile)
 
 DEBUG_PLATFORM_WRITE_ENTIRE_FILE(DEBUGPlatformWriteEntireFile)
 {
-    bool32 Result = false;
+    b32 Result = false;
 
     HANDLE FileHandle = CreateFileA(Filename, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
     if(FileHandle != INVALID_HANDLE_VALUE)
@@ -363,7 +363,7 @@ Win32UnloadGameCode(win32_game_code *GameCode)
   plain 16-bit stereo whatever the device uses.
 */
 internal void
-Win32InitWASAPI(win32_sound_output *Sound, uint32 SamplesPerSecond)
+Win32InitWASAPI(win32_sound_output *Sound, u32 SamplesPerSecond)
 {
     Sound->SamplesPerSecond = SamplesPerSecond;
 
@@ -444,13 +444,13 @@ Win32InitWASAPI(win32_sound_output *Sound, uint32 SamplesPerSecond)
     Sound->AudioClient->GetBufferSize(&BufferSizeInFrames);
     Sound->BufferSizeInFrames = BufferSizeInFrames;
 
-    Sound->LatencyFrames = (uint32)(WIN32_SOUND_LATENCY_SECONDS * (real32)SamplesPerSecond);
+    Sound->LatencyFrames = (u32)(WIN32_SOUND_LATENCY_SECONDS * (r32)SamplesPerSecond);
     if(Sound->LatencyFrames > Sound->BufferSizeInFrames)
     {
         Sound->LatencyFrames = Sound->BufferSizeInFrames;
     }
 
-    Sound->Samples = (int16 *)VirtualAlloc(0, Sound->BufferSizeInFrames * 2 * sizeof(int16),
+    Sound->Samples = (i16 *)VirtualAlloc(0, Sound->BufferSizeInFrames * 2 * sizeof(i16),
                                            MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
     if(!Sound->Samples)
     {
@@ -467,7 +467,7 @@ Win32InitWASAPI(win32_sound_output *Sound, uint32 SamplesPerSecond)
 */
 internal void
 Win32FillSoundBuffer(win32_sound_output *Sound, win32_game_code *Game,
-                     thread_context *Thread, game_memory *Memory, bool32 WriteSilence)
+                     thread_context *Thread, game_memory *Memory, b32 WriteSilence)
 {
     if(!Sound->IsValid)
     {
@@ -486,14 +486,14 @@ Win32FillSoundBuffer(win32_sound_output *Sound, win32_game_code *Game,
         return;
     }
 
-    uint32 FramesToWrite = Sound->LatencyFrames - Padding;
+    u32 FramesToWrite = Sound->LatencyFrames - Padding;
 
     game_sound_output_buffer SoundBuffer = {};
-    SoundBuffer.SamplesPerSecond = (int32)Sound->SamplesPerSecond;
-    SoundBuffer.SampleCount = (int32)FramesToWrite;
+    SoundBuffer.SamplesPerSecond = (i32)Sound->SamplesPerSecond;
+    SoundBuffer.SampleCount = (i32)FramesToWrite;
     SoundBuffer.Samples = Sound->Samples;
 
-    bool32 Silent = WriteSilence || !Game->GetSoundSamples;
+    b32 Silent = WriteSilence || !Game->GetSoundSamples;
     if(!Silent)
     {
         Game->GetSoundSamples(Thread, Memory, &SoundBuffer);
@@ -505,7 +505,7 @@ Win32FillSoundBuffer(win32_sound_output *Sound, win32_game_code *Game,
     {
         if(!Silent)
         {
-            CopyMemory(Destination, Sound->Samples, FramesToWrite * 2 * sizeof(int16));
+            CopyMemory(Destination, Sound->Samples, FramesToWrite * 2 * sizeof(i16));
         }
 
         // SILENT tells WASAPI to play zeros for these, without our having to
@@ -525,8 +525,8 @@ Win32FillSoundBuffer(win32_sound_output *Sound, win32_game_code *Game,
 // ---------------------------------------------------------------------------
 
 internal void
-Win32GetInputFileLocation(win32_state *State, bool32 InputStream,
-                          int32 SlotIndex, size_t DestCount, char *Dest)
+Win32GetInputFileLocation(win32_state *State, b32 InputStream,
+                          i32 SlotIndex, size_t DestCount, char *Dest)
 {
     char Temp[64];
     snprintf(Temp, sizeof(Temp), "loop_edit_%d_%s.hmi", SlotIndex, InputStream ? "input" : "state");
@@ -540,9 +540,9 @@ Win32GetInputFileLocation(win32_state *State, bool32 InputStream,
   then.
 */
 internal win32_replay_buffer *
-Win32GetReplayBuffer(win32_state *State, int32 Index)
+Win32GetReplayBuffer(win32_state *State, i32 Index)
 {
-    Assert((Index > 0) && (Index < (int32)ArrayCount(State->ReplayBuffers)));
+    Assert((Index > 0) && (Index < (i32)ArrayCount(State->ReplayBuffers)));
     win32_replay_buffer *ReplayBuffer = &State->ReplayBuffers[Index];
 
     if(!ReplayBuffer->MemoryBlock)
@@ -571,7 +571,7 @@ Win32GetReplayBuffer(win32_state *State, int32 Index)
 }
 
 internal void
-Win32BeginRecordingInput(win32_state *State, int32 InputRecordingIndex)
+Win32BeginRecordingInput(win32_state *State, i32 InputRecordingIndex)
 {
     win32_replay_buffer *ReplayBuffer = Win32GetReplayBuffer(State, InputRecordingIndex);
     if(ReplayBuffer->MemoryBlock)
@@ -594,7 +594,7 @@ Win32EndRecordingInput(win32_state *State)
 }
 
 internal void
-Win32BeginInputPlayBack(win32_state *State, int32 InputPlayingIndex)
+Win32BeginInputPlayBack(win32_state *State, i32 InputPlayingIndex)
 {
     win32_replay_buffer *ReplayBuffer = Win32GetReplayBuffer(State, InputPlayingIndex);
     if(ReplayBuffer->MemoryBlock)
@@ -632,7 +632,7 @@ Win32PlayBackInput(win32_state *State, game_input *NewInput)
         if(BytesRead == 0)
         {
             // The end of the recording: start the loop again - memory and all.
-            int32 PlayingIndex = State->InputPlayingIndex;
+            i32 PlayingIndex = State->InputPlayingIndex;
             Win32EndInputPlayBack(State);
             Win32BeginInputPlayBack(State, PlayingIndex);
             ReadFile(State->PlaybackHandle, NewInput, sizeof(*NewInput), &BytesRead, 0);
@@ -736,7 +736,7 @@ Win32ToggleFullscreen(HWND Window)
 // Records a button going up or down.  Only counts a CHANGE, so Windows'
 // key-repeat messages while a key is held do not add transitions.
 internal void
-Win32ProcessKeyboardMessage(game_button_state *NewState, bool32 IsDown)
+Win32ProcessKeyboardMessage(game_button_state *NewState, b32 IsDown)
 {
     if(NewState->EndedDown != IsDown)
     {
@@ -761,14 +761,14 @@ Win32ProcessKeyboardMessage(game_button_state *NewState, bool32 IsDown)
 internal void
 Win32BeginInput(game_input *NewInput, game_input *OldInput)
 {
-    for(uint32 Index = 0; Index < ArrayCount(NewInput->Keyboard.Buttons); ++Index)
+    for(u32 Index = 0; Index < ArrayCount(NewInput->Keyboard.Buttons); ++Index)
     {
         NewInput->Keyboard.Buttons[Index].HalfTransitionCount = 0;
         NewInput->Keyboard.Buttons[Index].EndedDown =
             OldInput->Keyboard.Buttons[Index].EndedDown;
     }
 
-    for(uint32 Index = 0; Index < MOUSE_BUTTON_COUNT; ++Index)
+    for(u32 Index = 0; Index < MOUSE_BUTTON_COUNT; ++Index)
     {
         NewInput->MouseButtons[Index].HalfTransitionCount = 0;
         NewInput->MouseButtons[Index].EndedDown = OldInput->MouseButtons[Index].EndedDown;
@@ -805,13 +805,13 @@ Win32ProcessPendingMessages(win32_state *State, game_input *NewInput)
             case WM_KEYDOWN:
             case WM_KEYUP:
             {
-                uint32 VKCode = (uint32)Message.wParam;
+                u32 VKCode = (u32)Message.wParam;
 
                 // NOTE(yigit): Since we are comparing WasDown to IsDown, we
                 // MUST use == and != to turn these bit tests into actual 0 or
                 // 1 values.
-                bool32 WasDown = ((Message.lParam & (1 << 30)) != 0);
-                bool32 IsDown  = ((Message.lParam & (1 << 31)) == 0);
+                b32 WasDown = ((Message.lParam & (1 << 30)) != 0);
+                b32 IsDown  = ((Message.lParam & (1 << 31)) == 0);
 
                 // Only CHANGES.  Holding a key sends a stream of repeated
                 // key-downs, all with WasDown already set.
@@ -880,7 +880,7 @@ Win32ProcessPendingMessages(win32_state *State, game_input *NewInput)
                 // NOTE(yigit): Alt+F4 has to be handled by hand, because key
                 // messages are not passed on to DefWindowProc, which is what
                 // normally closes the window for it.
-                bool32 AltKeyWasDown = ((Message.lParam & (1 << 29)) != 0);
+                b32 AltKeyWasDown = ((Message.lParam & (1 << 29)) != 0);
                 if((VKCode == VK_F4) && AltKeyWasDown)
                 {
                     GlobalRunning = false;
@@ -921,7 +921,7 @@ Win32ProcessPendingMessages(win32_state *State, game_input *NewInput)
             {
                 // The wheel reports in units of WHEEL_DELTA (120) per notch.
                 // Divided here, so the game sees whole notches.
-                int32 WheelDelta = GET_WHEEL_DELTA_WPARAM(Message.wParam);
+                i32 WheelDelta = GET_WHEEL_DELTA_WPARAM(Message.wParam);
                 NewInput->MouseZ += WheelDelta / WHEEL_DELTA;
             } break;
 
@@ -948,9 +948,9 @@ Win32UpdateMouse(HWND Window, game_input *NewInput)
         // stay "held" forever.
         int VirtualKeys[MOUSE_BUTTON_COUNT] = {VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
                                               VK_XBUTTON1, VK_XBUTTON2};
-        for(uint32 Index = 0; Index < MOUSE_BUTTON_COUNT; ++Index)
+        for(u32 Index = 0; Index < MOUSE_BUTTON_COUNT; ++Index)
         {
-            bool32 IsDown = ((GetKeyState(VirtualKeys[Index]) & (1 << 15)) != 0);
+            b32 IsDown = ((GetKeyState(VirtualKeys[Index]) & (1 << 15)) != 0);
             Win32ProcessKeyboardMessage(&NewInput->MouseButtons[Index], IsDown);
         }
 
@@ -983,7 +983,7 @@ Win32UpdateMouse(HWND Window, game_input *NewInput)
         NewInput->MouseDeltaY = 0;
         NewInput->MouseZ = 0;
 
-        for(uint32 Index = 0; Index < MOUSE_BUTTON_COUNT; ++Index)
+        for(u32 Index = 0; Index < MOUSE_BUTTON_COUNT; ++Index)
         {
             Win32ProcessKeyboardMessage(&NewInput->MouseButtons[Index], false);
         }
@@ -1110,7 +1110,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
     Win32State.GameMemoryBlock = VirtualAlloc(BaseAddress, (size_t)Win32State.TotalSize,
                                               MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
     GameMemory.PermanentStorage = Win32State.GameMemoryBlock;
-    GameMemory.TransientStorage = ((uint8 *)GameMemory.PermanentStorage +
+    GameMemory.TransientStorage = ((u8 *)GameMemory.PermanentStorage +
                                    GameMemory.PermanentStorageSize);
 
     // The renderer's block, apart from the other two - see game_memory.
@@ -1145,8 +1145,8 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
     QueryPerformanceCounter(&LastCounter);
 
     // For the frame time shown in the title bar.
-    real32 TitleTimer = 0.0f;
-    int32 TitleFrames = 0;
+    r32 TitleTimer = 0.0f;
+    i32 TitleFrames = 0;
 
     GlobalRunning = true;
     while(GlobalRunning)
@@ -1159,7 +1159,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
         // a broken DLL, and the finished file then carries the same write
         // time already seen, so it would never be picked up at all.
         FILETIME NewDLLWriteTime = Win32GetLastWriteTime(SourceGameCodeDLLFullPath);
-        bool32 DLLBeingWritten = (GetFileAttributesA(GameCodeLockFullPath) != INVALID_FILE_ATTRIBUTES);
+        b32 DLLBeingWritten = (GetFileAttributesA(GameCodeLockFullPath) != INVALID_FILE_ATTRIBUTES);
         if(!DLLBeingWritten && (CompareFileTime(&NewDLLWriteTime, &Game.DLLLastWriteTime) != 0))
         {
             Win32UnloadGameCode(&Game);
@@ -1173,8 +1173,8 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
         // How long the last frame took.
         LARGE_INTEGER Counter;
         QueryPerformanceCounter(&Counter);
-        real32 SecondsElapsed = (real32)(Counter.QuadPart - LastCounter.QuadPart) /
-                                (real32)Frequency.QuadPart;
+        r32 SecondsElapsed = (r32)(Counter.QuadPart - LastCounter.QuadPart) /
+                                (r32)Frequency.QuadPart;
         LastCounter = Counter;
 
         if(SecondsElapsed > WIN32_MAX_FRAME_SECONDS)
@@ -1188,7 +1188,7 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
 
         // Minimised: the window is 0x0, and there is nothing to draw into.
         // Sleep instead of spinning the CPU at 100% on an empty loop.
-        bool32 Minimised = (GlobalClientWidth == 0) || (GlobalClientHeight == 0);
+        b32 Minimised = (GlobalClientWidth == 0) || (GlobalClientHeight == 0);
         if(Minimised || GlobalPause)
         {
             // The sound card still has to be fed - with silence - or it runs
@@ -1234,8 +1234,8 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
             {
                 char Title[128];
                 snprintf(Title, sizeof(Title), "clash  -  %.2f ms  %.0f fps%s%s%s",
-                         1000.0f*TitleTimer / (real32)TitleFrames,
-                         (real32)TitleFrames / TitleTimer,
+                         1000.0f*TitleTimer / (r32)TitleFrames,
+                         (r32)TitleFrames / TitleTimer,
                          Win32State.InputRecordingIndex ? "  [RECORDING]" : "",
                          Win32State.InputPlayingIndex ? "  [PLAYING BACK]" : "",
                          SoundOutput.IsValid ? "" : "  [NO SOUND]");

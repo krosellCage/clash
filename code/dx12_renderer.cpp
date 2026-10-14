@@ -29,7 +29,7 @@
     6. A textured cube: descriptor heaps, a texture, the upload path.
 */
 
-// bool32, internal, game_input, game_memory...  game.cpp has already
+// b32, internal, game_input, game_memory...  game.cpp has already
 // included this before it includes us, so in the build it does nothing - the
 // include guard skips it.  It is here so this file makes sense on its own,
 // to a reader and to the editor.
@@ -52,19 +52,19 @@
 // ID3D12Device *, swapchain, command queue and so on here.
 struct dx12_renderer
 {
-    bool32 IsInitialized;
+    b32 IsInitialized;
 
     // The size the swapchain was last made for.  RendererRender compares
     // this against the window's size each frame to spot a resize.
-    int32 Width;
-    int32 Height;
+    i32 Width;
+    i32 Height;
 };
 
 // Window is the HWND the swapchain draws into.  Returns false if DirectX 12
 // could not be started.
-internal bool32
+internal b32
 RendererInitialize(dx12_renderer *Renderer, game_memory *Memory, HWND Window,
-                   int32 Width, int32 Height)
+                   i32 Width, i32 Height)
 {
     Renderer->Width = Width;
     Renderer->Height = Height;
@@ -75,7 +75,7 @@ RendererInitialize(dx12_renderer *Renderer, game_memory *Memory, HWND Window,
 // Width and Height are the window's new INNER size - the part you draw into.
 // Never called with 0: the platform does not run the game while minimised.
 internal void
-RendererResize(dx12_renderer *Renderer, int32 Width, int32 Height)
+RendererResize(dx12_renderer *Renderer, i32 Width, i32 Height)
 {
     Renderer->Width = Width;
     Renderer->Height = Height;
