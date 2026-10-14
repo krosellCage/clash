@@ -74,6 +74,18 @@ struct dx12_renderer
     b32 SupportsRaytracing;
     b32 SupportsMeshShaders;
     ID3D12Device5 *Device5;
+
+    // The GPU's to-do list, and what the CPU records work into.  The CPU
+    // records commands into the list - their memory comes from the
+    // allocator - and hands the closed list to the queue.  The GPU works
+    // through the queue in its own time.
+    ID3D12CommandQueue *Queue;
+    ID3D12CommandAllocator *CommandAllocator;
+    ID3D12GraphicsCommandList *CommandList;
+
+    ID3D12Fence *Fence;
+    u64 FenceValue;        // the last value we asked the queue to Signal
+    HANDLE FenceEvent;     // made once, reused by every wait
 };
 
 // Every DirectX object is a COM object: Release it once, when done.  Zeroing
@@ -88,6 +100,9 @@ RendererLog(thread_context *Thread, game_memory *Memory, const char *Message)
     Memory->DEBUGPlatformLog(Thread, Message);
 #endif
 }
+
+// RendererInitialize calls it to clean up when it fails halfway.
+internal void RendererShutdown(dx12_renderer *Renderer);
 
 // Window is the HWND the swapchain draws into.  Returns false if DirectX 12
 // could not be started.
@@ -177,7 +192,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     if(!Renderer->Device)
     {
         RendererLog(Thread, Memory, "ERROR: No GPU here can run DirectX 12 (feature level 12_0).\n");
-        ReleaseAndZero(Renderer->Factory);
+        RendererShutdown(Renderer);
         return(false);
     }
 
@@ -249,6 +264,64 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
              Renderer->SupportsMeshShaders ? "yes" : "no");
     RendererLog(Thread, Memory, Line);
 
+    if(FAILED(Renderer->Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                    IID_PPV_ARGS(&Renderer->Fence))))
+    {
+        RendererLog(Thread, Memory, "ERROR: CreateFence failed.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+    Renderer->FenceEvent = CreateEventExA(0, 0, 0, EVENT_ALL_ACCESS);
+    if(!Renderer->FenceEvent)
+    {
+        RendererLog(Thread, Memory, "ERROR: CreateEventExA failed.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
+    // ------------------------------------------------------------------
+    // Command queue, allocator and list (Luna 4.3.3).
+    //
+    // DIRECT is the queue type that can draw; it takes copy and compute
+    // work too.  Later, a separate COPY queue can stream assets and a
+    // COMPUTE queue can run work alongside drawing ("async compute") -
+    // one DIRECT queue is all we need now.
+    // ------------------------------------------------------------------
+    D3D12_COMMAND_QUEUE_DESC QueueDesc = {};
+    QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    QueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    if(FAILED(Renderer->Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Renderer->Queue))))
+    {
+        RendererLog(Thread, Memory, "ERROR: CreateCommandQueue failed.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
+    // The memory recorded commands live in.  It must not be Reset until
+    // the GPU has finished every command in it - FlushCommandQueue first.
+    if(FAILED(Renderer->Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                       IID_PPV_ARGS(&Renderer->CommandAllocator))))
+    {
+        RendererLog(Thread, Memory, "ERROR: CreateCommandAllocator failed.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
+    // 0: the first (only) GPU.  No pipeline state yet - nothing is drawn
+    // with one until milestone 4, and it can be set while recording.
+    if(FAILED(Renderer->Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                  Renderer->CommandAllocator, 0,
+                                                  IID_PPV_ARGS(&Renderer->CommandList))))
+    {
+        RendererLog(Thread, Memory, "ERROR: CreateCommandList failed.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
+    // A new list starts open, ready to record.  Every frame begins with
+    // Reset, and Reset needs a closed list - so close it now.
+    Renderer->CommandList->Close();
+
     return(true);
 }
 
@@ -268,12 +341,48 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
 {
 }
 
+// Waits until the GPU has finished everything queued so far.
+internal void
+FlushCommandQueue(dx12_renderer *Renderer)
+{
+    // Nothing to wait for - and nothing to Signal with - when
+    // RendererInitialize failed before these were made.
+    if(!Renderer->Queue || !Renderer->Fence)
+    {
+        return;
+    }
+
+    ++Renderer->FenceValue;
+    Renderer->Queue->Signal(Renderer->Fence, Renderer->FenceValue);
+
+    if(Renderer->Fence->GetCompletedValue() < Renderer->FenceValue)
+    {
+        Renderer->Fence->SetEventOnCompletion(Renderer->FenceValue, Renderer->FenceEvent);
+        WaitForSingleObject(Renderer->FenceEvent, INFINITE);
+    }
+}
+
 // Wait for the GPU to finish before anything is released - it may still be
 // using the resources the last frame submitted.
 internal void
 RendererShutdown(dx12_renderer *Renderer)
 {
-    // Newest first - the reverse of the order they were made in.
+    FlushCommandQueue(Renderer);
+
+    // Checked: a failed RendererInitialize may not have made it, and under
+    // a debugger CloseHandle on a bad handle raises an exception.
+    if(Renderer->FenceEvent)
+    {
+        CloseHandle(Renderer->FenceEvent);
+        Renderer->FenceEvent = 0;
+    }
+
+    //NOTE(yigit): Order matters. Newest first.
+
+    ReleaseAndZero(Renderer->CommandList);
+    ReleaseAndZero(Renderer->CommandAllocator);
+    ReleaseAndZero(Renderer->Queue);
+    ReleaseAndZero(Renderer->Fence);
     ReleaseAndZero(Renderer->Device5);
     ReleaseAndZero(Renderer->Device);
     ReleaseAndZero(Renderer->Adapter);

@@ -44,13 +44,16 @@ LOG
          add BeginTemporaryMemory / EndTemporaryMemory to arena.h.
 
 2026-10-14
-  Read   Luna, section 4.3.1 "Create the Device" (book page 125)
+  Read   Luna, 4.3.1 "Create the Device", 4.2.2 "CPU/GPU Synchronization",
+         4.3.2 fence, 4.3.3 command queue and list
   Watch
   Built  dx12_renderer.cpp milestone 1: debug layer, DXGI factory, device
          on the high-performance GPU (feature level 12_0 minimum), break
          on D3D12 errors under a debugger, ray tracing / mesh shader
-         checks, GPU logged at startup.
+         checks, GPU logged at startup. Milestone 2 started: fence +
+         FlushCommandQueue, command queue, allocator and list; shutdown
+         waits for the GPU before releasing.
   Hours
   Next   Run under the debugger and check the "GPU:" line. Then Luna
-         4.3.2-4.3.3 and milestone 2: fence, command queue, allocator +
-         list, swapchain, clear the window to a colour.
+         4.3.4 swap chain, an RTV descriptor heap, and clear the window
+         to a colour - the rest of milestone 2.
