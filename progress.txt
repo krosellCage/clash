@@ -1,0 +1,56 @@
+CLASH PROGRESS LOG
+==========================================================================
+One entry per day, newest at the bottom. Keep it short: what you read,
+what you built, what's next. The plan is in moba_reading_list.txt on the
+Desktop.
+
+Fields:
+  Read   - books, articles, papers (with pages or chapters)
+  Watch  - talks, Handmade Hero episodes (with numbers)
+  Built  - what you wrote in clash (commits count)
+  Hours  - rough total for the day
+  Next   - the first thing to do tomorrow, so you can start without
+           thinking
+
+
+RUNNING TOTALS (update when they change)
+--------------------------------------------------------------------------
+  Current phase ......... 2 - First pixels in DX12
+  Luna (DX12 book) ...... 30 / ~900 pages (in chapter 4)
+  Handmade Hero ......... 3 episodes this log
+  Reading list hours .... see moba_reading_list.txt for phase budgets
+
+
+LOG
+--------------------------------------------------------------------------
+
+2026-10-12
+  Read   Luna, chapter 4 "Direct3D Initialization", 30 pages
+  Watch  Handmade Hero, 3 episodes
+  Built  Renamed the project from dx12 to clash. Added DirectXMath and
+         SimpleMath, made game_math.h row-major.
+  Hours
+  Next   dx12_renderer.cpp milestone 1: debug layer (CLASH_DEBUG only),
+         create the device, log which GPU you got. Then milestone 2:
+         command queue, swapchain, allocator + list, fence, an RTV
+         descriptor heap, and clear the window to a colour.
+
+2026-10-13
+  Read
+  Watch  Mike Acton, "Data-Oriented Design and C++" (CppCon 2014)
+  Built
+  Hours
+  Next   Ryan Fleury, "Untangling Lifetimes: The Arena Allocator", then
+         add BeginTemporaryMemory / EndTemporaryMemory to arena.h.
+
+2026-10-14
+  Read   Luna, section 4.3.1 "Create the Device" (book page 125)
+  Watch
+  Built  dx12_renderer.cpp milestone 1: debug layer, DXGI factory, device
+         on the high-performance GPU (feature level 12_0 minimum), break
+         on D3D12 errors under a debugger, ray tracing / mesh shader
+         checks, GPU logged at startup.
+  Hours
+  Next   Run under the debugger and check the "GPU:" line. Then Luna
+         4.3.2-4.3.3 and milestone 2: fence, command queue, allocator +
+         list, swapchain, clear the window to a colour.
