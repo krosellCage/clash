@@ -61,7 +61,8 @@ LOG
          window to a colour, Present - the rest of milestone 2.
 
 2026-10-15
-  Read   Luna 4.3.5 descriptor heaps, 4.3.6 render target views
+  Read   Luna 4.3.5 descriptor heaps, 4.3.6 render target views, 4.3.7
+         depth/stencil buffer
   Watch
   Built  DirectX 12 Agility SDK 1.619.6 in code/external, copied to
          build/D3D12/ by build.bat, exported from clash.exe. The debug
@@ -69,7 +70,10 @@ LOG
          feature level 12_2 instead of 12_1. RendererResize now
          resizes the swap chain (milestone 3). Luna 4.3.5-4.3.6: RTV
          descriptor heap and back buffer views; the window clears to
-         pink every frame, through resizes (milestone 2 done).
+         pink every frame, through resizes (milestone 2 done). Depth
+         buffer: D32_FLOAT, DSV heap, made straight into DEPTH_WRITE,
+         rebuilt on resize, cleared and bound with OMSetRenderTargets
+         every frame.
   Hours
-  Next   Luna 4.3.7: depth/stencil buffer and view. Then milestone 4 - a
+  Next   Luna 4.3.8-4.3.9 viewport and scissor. Then milestone 4 - a
          triangle: root signature, pipeline state, vertex buffer, shader.

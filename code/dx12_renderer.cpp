@@ -53,6 +53,17 @@
 // Two: one on screen, one being drawn into (double buffering).
 #define SWAP_CHAIN_BUFFER_COUNT 2
 
+// The depth buffer (Luna 4.3.7): 32-bit float depth, no stencil - nothing
+// uses stencil yet, and D24_UNORM_S8_UINT has less precision far away.
+//
+// TODO(yigit): Reversed-Z, before the scene gets big.  A third-person
+// camera sees from the hero's feet to the horizon, and normal depth spends
+// almost all its precision near the camera - far things z-fight.  Reversed-Z
+// stores 1 at the near plane and 0 at the far one: clear to 0.0f, test with
+// GREATER, and swap near and far in the projection matrix.
+#define DEPTH_FORMAT      DXGI_FORMAT_D32_FLOAT
+#define DEPTH_CLEAR_VALUE 1.0f      // the far plane
+
 /*
   A descriptor heap (Luna 4.3.5) - an array of descriptors, one type per
   heap, fixed in size when it is made.  Slot i lives at Start + i *
@@ -126,6 +137,12 @@ struct dx12_renderer
     // and fetched again after it.
     ID3D12Resource *BackBuffers[SWAP_CHAIN_BUFFER_COUNT];
     descriptor_heap RtvHeap;
+
+    // How far away the nearest surface drawn so far is, for every pixel -
+    // the same size as the back buffer, and ours, not the swap chain's, so
+    // RendererResize makes a new one.  Its one view is in DsvHeap slot 0.
+    ID3D12Resource *DepthBuffer;
+    descriptor_heap DsvHeap;
 };
 
 // Every DirectX object is a COM object: Release it once, when done.  Zeroing
@@ -216,6 +233,53 @@ ReleaseBackBuffers(dx12_renderer *Renderer)
     {
         ReleaseAndZero(Renderer->BackBuffers[BufferIndex]);
     }
+}
+
+// Makes the depth buffer at this size, and writes its view into DsvHeap
+// slot 0.  At startup, and after every resize.
+internal b32
+CreateDepthBuffer(dx12_renderer *Renderer, i32 Width, i32 Height)
+{
+    // DEFAULT: in VRAM, where only the GPU reads and writes it.
+    D3D12_HEAP_PROPERTIES HeapProperties = {};
+    HeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC Desc = {};
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    Desc.Alignment = 0;                     // the default, 64 KB
+    Desc.Width = (UINT64)Width;             // must match the render target
+    Desc.Height = (UINT)Height;
+    Desc.DepthOrArraySize = 1;
+    Desc.MipLevels = 1;
+    Desc.Format = DEPTH_FORMAT;
+    Desc.SampleDesc.Count = 1;              // must match the render target too
+    Desc.SampleDesc.Quality = 0;
+    Desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;  // the GPU's own tiled layout
+    Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    // A clear with exactly these values can be faster - and the per-frame
+    // clear uses the same DEPTH_CLEAR_VALUE, or the debug layer warns.
+    D3D12_CLEAR_VALUE OptimizedClear = {};
+    OptimizedClear.Format = DEPTH_FORMAT;
+    OptimizedClear.DepthStencil.Depth = DEPTH_CLEAR_VALUE;
+    OptimizedClear.DepthStencil.Stencil = 0;
+
+    // "Committed": the memory and the resource made together, in one call.
+    // Made straight into DEPTH_WRITE - unlike Luna's COMMON-then-barrier -
+    // since depth testing is all it is ever used for.
+    if(FAILED(Renderer->Device->CreateCommittedResource(&HeapProperties, D3D12_HEAP_FLAG_NONE,
+                                                        &Desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                                        &OptimizedClear,
+                                                        IID_PPV_ARGS(&Renderer->DepthBuffer))))
+    {
+        return(false);
+    }
+
+    // 0 for the view's description: the format it was made with, mip 0.
+    Renderer->Device->CreateDepthStencilView(Renderer->DepthBuffer, 0,
+                                             DescriptorCpuHandle(&Renderer->DsvHeap, 0));
+
+    return(true);
 }
 
 // A barrier that moves a whole resource from one state to another.
@@ -565,6 +629,24 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
+    // ------------------------------------------------------------------
+    // The depth buffer, and a one-slot DSV heap for its view (Luna 4.3.7).
+    // ------------------------------------------------------------------
+    if(!DescriptorHeapInit(&Renderer->DsvHeap, Renderer->Device,
+                           D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1))
+    {
+        RendererLog(Thread, Memory, "ERROR: Could not make the DSV descriptor heap.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
+    if(!CreateDepthBuffer(Renderer, Width, Height))
+    {
+        RendererLog(Thread, Memory, "ERROR: Could not make the depth buffer.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
     return(true);
 }
 
@@ -614,6 +696,14 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     {
         RendererLog(Thread, Memory, "ERROR: Could not get the swap chain's buffers after a resize.\n");
     }
+
+    // ResizeBuffers only resizes the swap chain's own buffers.  The depth
+    // buffer is ours: a new one at the new size, its view in the same slot.
+    ReleaseAndZero(Renderer->DepthBuffer);
+    if(!CreateDepthBuffer(Renderer, Width, Height))
+    {
+        RendererLog(Thread, Memory, "ERROR: Could not make the depth buffer after a resize.\n");
+    }
 }
 
 // Input holds this frame's keyboard and mouse (see platform.h), and
@@ -621,7 +711,7 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 internal void
 RendererRender(dx12_renderer *Renderer, game_input *Input)
 {
-    if(!Renderer->SwapChain || !Renderer->BackBuffers[0])
+    if(!Renderer->SwapChain || !Renderer->BackBuffers[0] || !Renderer->DepthBuffer)
     {
         return;
     }
@@ -644,10 +734,22 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
                           D3D12_RESOURCE_STATE_RENDER_TARGET);
     Renderer->CommandList->ResourceBarrier(1, &ToRenderTarget);
 
+    D3D12_CPU_DESCRIPTOR_HANDLE Rtv = DescriptorCpuHandle(&Renderer->RtvHeap, BackBufferIndex);
+    D3D12_CPU_DESCRIPTOR_HANDLE Dsv = DescriptorCpuHandle(&Renderer->DsvHeap, 0);
+
     // Hot pink: 255, 105, 180.
     r32 ClearColor[4] = {1.0f, 0.41f, 0.71f, 1.0f};
-    Renderer->CommandList->ClearRenderTargetView(DescriptorCpuHandle(&Renderer->RtvHeap, BackBufferIndex),
-                                                 ClearColor, 0, 0);
+    Renderer->CommandList->ClearRenderTargetView(Rtv, ClearColor, 0, 0);
+
+    // Every pixel starts at the far plane, so anything drawn is in front.
+    // Depth only - there is no stencil in DEPTH_FORMAT.
+    Renderer->CommandList->ClearDepthStencilView(Dsv, D3D12_CLEAR_FLAG_DEPTH,
+                                                 DEPTH_CLEAR_VALUE, 0, 0, 0);
+
+    // "Output merger": the colour image and the depth buffer the next draws
+    // write into.  Nothing is drawn yet - milestone 4's triangle goes here,
+    // after this.
+    Renderer->CommandList->OMSetRenderTargets(1, &Rtv, FALSE, &Dsv);
 
     // And back to PRESENT, the only state Present accepts.
     D3D12_RESOURCE_BARRIER ToPresent =
@@ -667,8 +769,7 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
     Renderer->SwapChain->Present(1, 0);
 
     // NOTE(yigit): Waits for the GPU every frame, so the CPU and GPU take
-    // turns instead of working at the same time.  Luna chapter 7 fixes this
-    // with frames in flight.
+    // turns instead of working at the same time.
     FlushCommandQueue(Renderer);
 }
 
@@ -710,6 +811,8 @@ RendererShutdown(dx12_renderer *Renderer)
 
     //NOTE(yigit): Order matters. Newest first.
 
+    ReleaseAndZero(Renderer->DepthBuffer);
+    ReleaseAndZero(Renderer->DsvHeap.Heap);
     ReleaseBackBuffers(Renderer);
     ReleaseAndZero(Renderer->RtvHeap.Heap);
     ReleaseAndZero(Renderer->SwapChain);
