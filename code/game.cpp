@@ -34,7 +34,7 @@ GetRenderer(thread_context *Thread, game_memory *Memory, game_input *Input)
 
     if(!Renderer->IsInitialized)
     {
-        if(RendererInitialize(Renderer, Memory, (HWND)Memory->PlatformWindow,
+        if(RendererInitialize(Renderer, Thread, Memory, (HWND)Memory->PlatformWindow,
                               Input->WindowWidth, Input->WindowHeight))
         {
             Renderer->IsInitialized = true;
