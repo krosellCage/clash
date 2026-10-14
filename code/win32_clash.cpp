@@ -10,6 +10,7 @@
   created by the game itself.
 
   The platform knows nothing about DirectX.  Drawing is entirely the game's.
+  (The one exception: the two Agility SDK numbers exported below.)
 */
 
 /* 
@@ -33,6 +34,22 @@
 
 #include "platform.h"
 #include "win32_clash.h"
+
+/*
+  NOTE(yigit): The DirectX 12 Agility SDK - the one place the platform
+  mentions DirectX, and only as two numbers.  When d3d12.dll loads, it looks
+  for these two exports in the EXE (not in game.dll) and, if it finds them,
+  uses the D3D12Core.dll and d3d12SDKLayers.dll in that folder instead of
+  the ones built into Windows.  They ship together, so the debug layer always
+  matches the runtime - and Windows 10 gets the newest D3D12.
+
+  D3D12SDKVersion must equal D3D12_SDK_VERSION in
+  code/external/D3D12AgilitySDK/include/d3d12.h; RendererInitialize logs an
+  error if they ever disagree.  D3D12SDKPath is relative to clash.exe -
+  build.bat copies the DLLs into build\D3D12\.
+*/
+extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619; }
+extern "C" { __declspec(dllexport) extern const char *D3D12SDKPath = ".\\D3D12\\"; }
 
 // The size of the window's INSIDE - what gets drawn into.  The outer size
 // adds the title bar and borders on top of this.

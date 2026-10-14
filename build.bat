@@ -50,10 +50,18 @@ REM it, it can catch the linker halfway through, load a half-written DLL (or
 REM fail to copy it), and then never notice the finished one.
 echo WAITING FOR PDB > lock.tmp
 
+REM The DirectX 12 Agility SDK's runtime and debug layer, next to clash.exe
+REM in D3D12\ - where the D3D12SDKPath export in win32_clash.cpp points.  /D
+REM copies only when ours are newer, so a running clash.exe (which holds them
+REM open) does not make the build fail.
+if not exist D3D12 mkdir D3D12
+xcopy /Y /D /Q ..\code\external\D3D12AgilitySDK\bin\x64\*.dll D3D12\ >nul
+
 REM The game.  -LD makes a DLL; -EXPORT names what the platform looks up.
 REM The DirectX libraries are linked here, not into the exe - the platform
-REM never touches DirectX.
-cl %CompilerFlags% ..\code\game.cpp -Fegame.dll -Fmgame.map -LD /link -incremental:no -opt:ref -PDB:game_%random%.pdb -EXPORT:GameUpdateAndRender -EXPORT:GameGetSoundSamples -EXPORT:GameShutdown d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
+REM never touches DirectX.  -I puts the Agility SDK's d3d12.h ahead of the
+REM Windows SDK's older one, so the headers match the runtime we ship.
+cl %CompilerFlags% -I..\code\external\D3D12AgilitySDK\include ..\code\game.cpp -Fegame.dll -Fmgame.map -LD /link -incremental:no -opt:ref -PDB:game_%random%.pdb -EXPORT:GameUpdateAndRender -EXPORT:GameGetSoundSamples -EXPORT:GameShutdown d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
 set GameResult=%ERRORLEVEL%
 
 del lock.tmp

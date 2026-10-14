@@ -59,3 +59,14 @@ LOG
   Next   Fix the debug layer ("SDKLayers dll does not match" - it is
          not running). Then Luna 4.3.5: RTV descriptor heap, clear the
          window to a colour, Present - the rest of milestone 2.
+
+2026-10-15
+  Read
+  Watch
+  Built  DirectX 12 Agility SDK 1.619.6 in code/external, copied to
+         build/D3D12/ by build.bat, exported from clash.exe. The debug
+         layer runs now (it was silently off), and the GPU reports
+         feature level 12_2 instead of 12_1.
+  Hours
+  Next   Luna 4.3.5: RTV descriptor heap, clear the window to a colour,
+         Present - the rest of milestone 2.

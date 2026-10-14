@@ -278,6 +278,35 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
              Renderer->SupportsMeshShaders ? "yes" : "no");
     RendererLog(Thread, Memory, Line);
 
+    // The Agility SDK (see the top of win32_clash.cpp).  The exe's export
+    // says which runtime version to load; these headers were written for
+    // D3D12_SDK_VERSION.  If the two disagree after an SDK upgrade, D3D12
+    // quietly falls back to the runtime built into Windows.
+    u32 *ExeSDKVersion = (u32 *)(void *)GetProcAddress(GetModuleHandleA(0), "D3D12SDKVersion");
+    if(!ExeSDKVersion)
+    {
+        RendererLog(Thread, Memory, "ERROR: clash.exe does not export D3D12SDKVersion - no Agility SDK.\n");
+    }
+    else if(*ExeSDKVersion != D3D12_SDK_VERSION)
+    {
+        snprintf(Line, sizeof(Line),
+                 "ERROR: clash.exe asks for D3D12 SDK %u but the headers are %u - "
+                 "update D3D12SDKVersion in win32_clash.cpp.\n",
+                 *ExeSDKVersion, (u32)D3D12_SDK_VERSION);
+        RendererLog(Thread, Memory, Line);
+    }
+
+    // Which D3D12Core.dll is really running: build\D3D12\ means the Agility
+    // SDK's, C:\Windows\System32 means the one built into Windows.
+    char CorePath[MAX_PATH] = {};
+    HMODULE Core = GetModuleHandleA("D3D12Core.dll");
+    if(Core)
+    {
+        GetModuleFileNameA(Core, CorePath, sizeof(CorePath));
+    }
+    snprintf(Line, sizeof(Line), "D3D12 runtime: %s\n", Core ? CorePath : "D3D12Core.dll not loaded");
+    RendererLog(Thread, Memory, Line);
+
     if(FAILED(Renderer->Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                     IID_PPV_ARGS(&Renderer->Fence))))
     {
