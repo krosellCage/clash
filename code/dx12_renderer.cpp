@@ -747,9 +747,30 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
                                                  DEPTH_CLEAR_VALUE, 0, 0, 0);
 
     // "Output merger": the colour image and the depth buffer the next draws
-    // write into.  Nothing is drawn yet - milestone 4's triangle goes here,
-    // after this.
+    // write into.
     Renderer->CommandList->OMSetRenderTargets(1, &Rtv, FALSE, &Dsv);
+
+    // The viewport (Luna 4.3.8): where on the back buffer to draw - all of
+    // it.  It turns the shaders' -1..1 coordinates into pixels, and maps
+    // depth 0..1 onto MinDepth..MaxDepth (left as they are).  Reset clears
+    // it, so it is set every frame.
+    D3D12_VIEWPORT Viewport = {};
+    Viewport.TopLeftX = 0.0f;
+    Viewport.TopLeftY = 0.0f;
+    Viewport.Width = (r32)Renderer->Width;
+    Viewport.Height = (r32)Renderer->Height;
+    Viewport.MinDepth = 0.0f;
+    Viewport.MaxDepth = 1.0f;
+    Renderer->CommandList->RSSetViewports(1, &Viewport);
+
+    // The scissor rectangle (Luna 4.3.9): pixels outside it are thrown away.
+    // IMPORTANT(yigit): In D3D12 the scissor test is ALWAYS on, and the
+    // default rectangle is empty - forget this and nothing is ever drawn.
+    // Clears ignore both, which is why the pink worked without them.
+    D3D12_RECT Scissor = {0, 0, Renderer->Width, Renderer->Height};
+    Renderer->CommandList->RSSetScissorRects(1, &Scissor);
+
+    // Nothing is drawn yet - milestone 4's triangle goes here.
 
     // And back to PRESENT, the only state Present accepts.
     D3D12_RESOURCE_BARRIER ToPresent =
