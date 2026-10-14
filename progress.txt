@@ -52,8 +52,10 @@ LOG
          on D3D12 errors under a debugger, ray tracing / mesh shader
          checks, GPU logged at startup. Milestone 2 started: fence +
          FlushCommandQueue, command queue, allocator and list; shutdown
-         waits for the GPU before releasing.
+         waits for the GPU before releasing. Swap chain (flip discard,
+         2 buffers, tearing when supported, DXGI Alt+Enter off).
+         Log: RTX 5070 Ti, feature level 12_1, RT yes, mesh shaders yes.
   Hours
-  Next   Run under the debugger and check the "GPU:" line. Then Luna
-         4.3.4 swap chain, an RTV descriptor heap, and clear the window
-         to a colour - the rest of milestone 2.
+  Next   Fix the debug layer ("SDKLayers dll does not match" - it is
+         not running). Then Luna 4.3.5: RTV descriptor heap, clear the
+         window to a colour, Present - the rest of milestone 2.

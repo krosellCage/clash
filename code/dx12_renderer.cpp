@@ -50,6 +50,9 @@
 
 #include <stdio.h>      // snprintf, for the log lines
 
+// Two: one on screen, one being drawn into (double buffering).
+#define SWAP_CHAIN_BUFFER_COUNT 2
+
 // Everything the renderer keeps from one frame to the next.  Add your
 // ID3D12Device *, swapchain, command queue and so on here.
 struct dx12_renderer
@@ -86,6 +89,17 @@ struct dx12_renderer
     ID3D12Fence *Fence;
     u64 FenceValue;        // the last value we asked the queue to Signal
     HANDLE FenceEvent;     // made once, reused by every wait
+
+    // The images that take turns on screen (Luna 4.1.4, 4.3.4).  Version 3
+    // for GetCurrentBackBufferIndex: with the flip model, the buffer to
+    // draw into is not always number 0 - ask every frame.
+    IDXGISwapChain3 *SwapChain;
+
+    // Vsync off without tearing artefacts on G-Sync / FreeSync monitors,
+    // and the lowest input latency.  Present needs DXGI_PRESENT_ALLOW_TEARING
+    // to use it, and ResizeBuffers must be given the same flags as creation.
+    b32 SupportsTearing;
+    UINT SwapChainFlags;
 };
 
 // Every DirectX object is a COM object: Release it once, when done.  Zeroing
@@ -322,6 +336,72 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     // Reset, and Reset needs a closed list - so close it now.
     Renderer->CommandList->Close();
 
+    // ------------------------------------------------------------------
+    // The swap chain (Luna 4.3.4).
+    // ------------------------------------------------------------------
+    BOOL AllowTearing = FALSE;
+    if(SUCCEEDED(Renderer->Factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                                                        &AllowTearing, sizeof(AllowTearing))))
+    {
+        Renderer->SupportsTearing = AllowTearing;
+    }
+    Renderer->SwapChainFlags = Renderer->SupportsTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+
+    DXGI_SWAP_CHAIN_DESC1 SwapDesc = {};
+    SwapDesc.Width = (UINT)Width;
+    SwapDesc.Height = (UINT)Height;
+
+    // 8 bits each of red, green, blue, alpha; UNORM reads 0-255 as 0-1.
+    // Flip-model swap chains cannot be _SRGB - for sRGB later, make the
+    // render target VIEW R8G8B8A8_UNORM_SRGB instead.
+    SwapDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    SwapDesc.Stereo = FALSE;
+
+    // No MSAA: flip-model swap chains cannot be multisampled.
+    SwapDesc.SampleDesc.Count = 1;
+    SwapDesc.SampleDesc.Quality = 0;
+
+    SwapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    SwapDesc.BufferCount = SWAP_CHAIN_BUFFER_COUNT;
+
+    // A window that is not the buffer's size shows it unstretched.
+    SwapDesc.Scaling = DXGI_SCALING_NONE;
+
+    // The flip model - required in D3D12.  DISCARD: the back buffer's old
+    // contents are gone after Present, so every frame is drawn in full.
+    SwapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    SwapDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+
+    // No ALLOW_MODE_SWITCH, unlike Luna: the platform does borderless
+    // fullscreen on F11 and never changes the monitor's resolution.
+    SwapDesc.Flags = Renderer->SwapChainFlags;
+
+    // The QUEUE, not the device: in D3D12, Present goes through the queue,
+    // after the work submitted before it.  The two zeros: no fullscreen
+    // settings (windowed), and any monitor may show it.
+    IDXGISwapChain1 *SwapChain1 = 0;
+    if(FAILED(Renderer->Factory->CreateSwapChainForHwnd(Renderer->Queue, Window, &SwapDesc,
+                                                        0, 0, &SwapChain1)))
+    {
+        RendererLog(Thread, Memory, "ERROR: CreateSwapChainForHwnd failed.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
+    // Up to version 3, for GetCurrentBackBufferIndex.
+    HRESULT SwapChainResult = SwapChain1->QueryInterface(IID_PPV_ARGS(&Renderer->SwapChain));
+    SwapChain1->Release();
+    if(FAILED(SwapChainResult))
+    {
+        RendererLog(Thread, Memory, "ERROR: No IDXGISwapChain3 - Windows is too old.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
+    // Left alone, DXGI makes Alt+Enter switch to its own fullscreen - which
+    // would fight the platform's F11 one.
+    Renderer->Factory->MakeWindowAssociation(Window, DXGI_MWA_NO_ALT_ENTER);
+
     return(true);
 }
 
@@ -379,6 +459,7 @@ RendererShutdown(dx12_renderer *Renderer)
 
     //NOTE(yigit): Order matters. Newest first.
 
+    ReleaseAndZero(Renderer->SwapChain);
     ReleaseAndZero(Renderer->CommandList);
     ReleaseAndZero(Renderer->CommandAllocator);
     ReleaseAndZero(Renderer->Queue);
