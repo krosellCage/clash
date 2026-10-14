@@ -60,8 +60,9 @@ xcopy /Y /D /Q ..\code\external\D3D12AgilitySDK\bin\x64\*.dll D3D12\ >nul
 REM The game.  -LD makes a DLL; -EXPORT names what the platform looks up.
 REM The DirectX libraries are linked here, not into the exe - the platform
 REM never touches DirectX.  -I puts the Agility SDK's d3d12.h ahead of the
-REM Windows SDK's older one, so the headers match the runtime we ship.
-cl %CompilerFlags% -I..\code\external\D3D12AgilitySDK\include ..\code\game.cpp -Fegame.dll -Fmgame.map -LD /link -incremental:no -opt:ref -PDB:game_%random%.pdb -EXPORT:GameUpdateAndRender -EXPORT:GameGetSoundSamples -EXPORT:GameShutdown d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
+REM Windows SDK's older one, so the headers match the runtime we ship.  The
+REM second -I is Dear ImGui's folder: its backend says #include "imgui.h".
+cl %CompilerFlags% -I..\code\external\D3D12AgilitySDK\include -I..\code\external\imgui ..\code\game.cpp -Fegame.dll -Fmgame.map -LD /link -incremental:no -opt:ref -PDB:game_%random%.pdb -EXPORT:GameUpdateAndRender -EXPORT:GameGetSoundSamples -EXPORT:GameShutdown -EXPORT:GameUnload d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
 set GameResult=%ERRORLEVEL%
 
 del lock.tmp

@@ -218,6 +218,15 @@ typedef GAME_GET_SOUND_SAMPLES(game_get_sound_samples);
 #define GAME_SHUTDOWN(name) void name(thread_context *Thread, game_memory *Memory)
 typedef GAME_SHUTDOWN(game_shutdown);
 
+// NOTE(yigit): Called just before game.dll is unloaded for a hot reload,
+// while its code is still loaded.  Anything holding pointers INTO the DLL -
+// its functions, its string constants, memory from its own C runtime heap -
+// is torn down here, and started again by the new DLL.  Dear ImGui is the
+// one thing that needs it so far.  Not called at the final exit: GameShutdown
+// covers that.
+#define GAME_UNLOAD(name) void name(thread_context *Thread, game_memory *Memory)
+typedef GAME_UNLOAD(game_unload);
+
 #ifdef __cplusplus
 }
 #endif

@@ -10,6 +10,8 @@
 -D_DEBUG
 -DCLASH_DEBUG=1
 -I.
+-Iexternal/D3D12AgilitySDK/include
+-Iexternal/imgui
 -Wall
 -Wno-unused-parameter
 -Wno-unused-variable

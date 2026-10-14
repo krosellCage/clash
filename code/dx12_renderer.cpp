@@ -29,6 +29,10 @@
     6. A textured cube: descriptor heaps, a texture, the upload path.
 */
 
+// game.cpp includes this first, and game_imgui.cpp includes it again so it
+// makes sense on its own in the editor - the guard keeps it to once.
+#if !defined(DX12_RENDERER_CPP)
+
 // b32, internal, game_input, game_memory...  game.cpp has already
 // included this before it includes us, so in the build it does nothing - the
 // include guard skips it.  It is here so this file makes sense on its own,
@@ -50,8 +54,26 @@
 
 #include <stdio.h>      // snprintf, for the log lines
 
+// Dear ImGui's API and its DX12 backend (see game_imgui.cpp).  Level 0: its
+// headers are not ours to keep free of -W4 warnings.  The old pre-1.91.5
+// API is switched off, so Luna's ImGui_ImplDX12_Init call cannot creep in.
+// The math operators (on ImGui's own ImVec2 only) because its .cpp files,
+// compiled later in this same unity build, need imgui.h to have them the
+// first time it is included.
+#define IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+#define IMGUI_DEFINE_MATH_OPERATORS
+#pragma warning(push, 0)
+#include "imgui.h"
+#include "backends/imgui_impl_dx12.h"
+#pragma warning(pop)
+
 // Two: one on screen, one being drawn into (double buffering).
 #define SWAP_CHAIN_BUFFER_COUNT 2
+#define SWAP_CHAIN_FORMAT DXGI_FORMAT_R8G8B8A8_UNORM
+
+// The one shader-visible CBV/SRV/UAV heap - everything shaders read goes in
+// it: Dear ImGui's font texture now, the game's textures from milestone 6.
+#define SRV_HEAP_CAPACITY 1024
 
 // The depth buffer (Luna 4.3.7): 32-bit float depth, no stencil - nothing
 // uses stencil yet, and D24_UNORM_S8_UINT has less precision far away.
@@ -143,6 +165,23 @@ struct dx12_renderer
     // RendererResize makes a new one.  Its one view is in DsvHeap slot 0.
     ID3D12Resource *DepthBuffer;
     descriptor_heap DsvHeap;
+
+    // The shader-visible heap, and who has which slot.  Slots are handed
+    // out from NextUnused upwards; given-back ones go on the free list and
+    // are reused first.
+    descriptor_heap SrvHeap;
+    u32 SrvNextUnused;
+    u32 SrvFreeCount;
+    u32 SrvFreeList[SRV_HEAP_CAPACITY];
+
+    // Dear ImGui's context - all of its state.  Made by game_imgui.cpp on
+    // the first frame after every load of game.dll, destroyed in GameUnload.
+    // 0 when it is not running.
+    ImGuiContext *ImGui;
+
+    // Things the debug UI shows and edits.
+    r32 ClearColor[4];
+    char GpuName[128];
 };
 
 // Every DirectX object is a COM object: Release it once, when done.  Zeroing
@@ -200,6 +239,46 @@ DescriptorCpuHandle(descriptor_heap *Heap, u32 Index)
     D3D12_CPU_DESCRIPTOR_HANDLE Result = Heap->CpuStart;
     Result.ptr += (SIZE_T)Index * Heap->DescriptorSize;
     return(Result);
+}
+
+// Where shaders find slot Index.  Shader-visible heaps only.
+inline D3D12_GPU_DESCRIPTOR_HANDLE
+DescriptorGpuHandle(descriptor_heap *Heap, u32 Index)
+{
+    Assert(Index < Heap->Count);
+    Assert(Heap->GpuStart.ptr);
+    D3D12_GPU_DESCRIPTOR_HANDLE Result = Heap->GpuStart;
+    Result.ptr += (UINT64)Index * Heap->DescriptorSize;
+    return(Result);
+}
+
+// A free slot in the shader-visible heap: a given-back one if there is one,
+// else the next never-used one.  False when the heap is full.
+internal b32
+SrvAllocate(dx12_renderer *Renderer, u32 *Index)
+{
+    b32 Result = true;
+    if(Renderer->SrvFreeCount)
+    {
+        *Index = Renderer->SrvFreeList[--Renderer->SrvFreeCount];
+    }
+    else if(Renderer->SrvNextUnused < Renderer->SrvHeap.Count)
+    {
+        *Index = Renderer->SrvNextUnused++;
+    }
+    else
+    {
+        Result = false;
+    }
+    return(Result);
+}
+
+internal void
+SrvRelease(dx12_renderer *Renderer, u32 Index)
+{
+    Assert(Index < Renderer->SrvNextUnused);
+    Assert(Renderer->SrvFreeCount < SRV_HEAP_CAPACITY);
+    Renderer->SrvFreeList[Renderer->SrvFreeCount++] = Index;
 }
 
 // Takes the swap chain's buffers and writes a render target view of each
@@ -457,6 +536,9 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
              Renderer->SupportsMeshShaders ? "yes" : "no");
     RendererLog(Thread, Memory, Line);
 
+    // Kept for the debug UI.
+    snprintf(Renderer->GpuName, sizeof(Renderer->GpuName), "%ls", Desc.Description);
+
     // The Agility SDK (see the top of win32_clash.cpp).  The exe's export
     // says which runtime version to load; these headers were written for
     // D3D12_SDK_VERSION.  If the two disagree after an SDK upgrade, D3D12
@@ -562,7 +644,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     // 8 bits each of red, green, blue, alpha; UNORM reads 0-255 as 0-1.
     // Flip-model swap chains cannot be _SRGB - for sRGB later, make the
     // render target VIEW R8G8B8A8_UNORM_SRGB instead.
-    SwapDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    SwapDesc.Format = SWAP_CHAIN_FORMAT;
     SwapDesc.Stereo = FALSE;
 
     // No MSAA: flip-model swap chains cannot be multisampled.
@@ -646,6 +728,26 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         RendererShutdown(Renderer);
         return(false);
     }
+
+    // ------------------------------------------------------------------
+    // The shader-visible heap.  Only one CBV/SRV/UAV heap can be bound at a
+    // time, so this one heap holds everything shaders read.
+    // ------------------------------------------------------------------
+    if(!DescriptorHeapInit(&Renderer->SrvHeap, Renderer->Device,
+                           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, SRV_HEAP_CAPACITY))
+    {
+        RendererLog(Thread, Memory, "ERROR: Could not make the shader-visible descriptor heap.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+    Renderer->SrvNextUnused = 0;
+    Renderer->SrvFreeCount = 0;
+
+    // Hot pink: 255, 105, 180.  The debug UI can change it.
+    Renderer->ClearColor[0] = 1.0f;
+    Renderer->ClearColor[1] = 0.41f;
+    Renderer->ClearColor[2] = 0.71f;
+    Renderer->ClearColor[3] = 1.0f;
 
     return(true);
 }
@@ -737,9 +839,8 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
     D3D12_CPU_DESCRIPTOR_HANDLE Rtv = DescriptorCpuHandle(&Renderer->RtvHeap, BackBufferIndex);
     D3D12_CPU_DESCRIPTOR_HANDLE Dsv = DescriptorCpuHandle(&Renderer->DsvHeap, 0);
 
-    // Hot pink: 255, 105, 180.
-    r32 ClearColor[4] = {1.0f, 0.41f, 0.71f, 1.0f};
-    Renderer->CommandList->ClearRenderTargetView(Rtv, ClearColor, 0, 0);
+    // Hot pink to start with - the debug UI can change it.
+    Renderer->CommandList->ClearRenderTargetView(Rtv, Renderer->ClearColor, 0, 0);
 
     // Every pixel starts at the far plane, so anything drawn is in front.
     // Depth only - there is no stencil in DEPTH_FORMAT.
@@ -771,6 +872,20 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
     Renderer->CommandList->RSSetScissorRects(1, &Scissor);
 
     // Nothing is drawn yet - milestone 4's triangle goes here.
+
+    // Dear ImGui last, so it is on top of everything.  Its font texture is
+    // in the shader-visible heap, which has to be bound for it to be read.
+    // GetDrawData is 0 unless ImGui::Render ran this frame.
+    if(Renderer->ImGui)
+    {
+        ImDrawData *DrawData = ImGui::GetDrawData();
+        if(DrawData && DrawData->Valid)
+        {
+            ID3D12DescriptorHeap *Heaps[] = {Renderer->SrvHeap.Heap};
+            Renderer->CommandList->SetDescriptorHeaps(1, Heaps);
+            ImGui_ImplDX12_RenderDrawData(DrawData, Renderer->CommandList);
+        }
+    }
 
     // And back to PRESENT, the only state Present accepts.
     D3D12_RESOURCE_BARRIER ToPresent =
@@ -832,6 +947,10 @@ RendererShutdown(dx12_renderer *Renderer)
 
     //NOTE(yigit): Order matters. Newest first.
 
+    // ImGui uses SrvHeap, so it must be stopped first - GameShutdown and
+    // GameUnload see to that.
+    Assert(!Renderer->ImGui);
+    ReleaseAndZero(Renderer->SrvHeap.Heap);
     ReleaseAndZero(Renderer->DepthBuffer);
     ReleaseAndZero(Renderer->DsvHeap.Heap);
     ReleaseBackBuffers(Renderer);
@@ -846,3 +965,6 @@ RendererShutdown(dx12_renderer *Renderer)
     ReleaseAndZero(Renderer->Adapter);
     ReleaseAndZero(Renderer->Factory);
 }
+
+#define DX12_RENDERER_CPP
+#endif

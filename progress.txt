@@ -75,7 +75,10 @@ LOG
          rebuilt on resize, cleared and bound with OMSetRenderTargets
          every frame. Viewport and scissor set to the whole back buffer
          every frame. game_state::TimeSeconds is r64 now (r32
-         drifted ~1.5% after 2048 s).
+         drifted ~1.5% after 2048 s). Dear ImGui 1.92.9b: debug window
+         (frame time, GPU, clear colour, sound, camera speed, demo
+         window), input from game_input, stopped in a new GameUnload
+         export before every hot reload and restarted after it.
   Hours
   Next   Milestone 4 - a triangle: root signature, pipeline state,
          vertex buffer, shader (Luna chapter 6).

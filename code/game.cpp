@@ -4,10 +4,11 @@
   arrives through game_memory and game_input (platform.h); it never calls
   Windows itself.
 
-  Three entry points, the only symbols the platform looks up:
+  Four entry points, the only symbols the platform looks up:
     GameUpdateAndRender   once per frame
     GameGetSoundSamples   once per frame, after it
     GameShutdown          once, on the way out
+    GameUnload            just before a hot reload unloads this DLL
 */
 
 #include "game.h"
@@ -19,6 +20,62 @@
 // SimpleMath's constants (Vector3::Up, Matrix::Identity...) are defined in
 // its .cpp - and this is a unity build, so it is compiled by including it.
 #include "external/DirectXTK12/SimpleMath.cpp"
+
+// Dear ImGui's setup and input.  Its own .cpp files are compiled at the very
+// END of this file - see there.
+#include "game_imgui.cpp"
+
+/*
+  The debug window.  Only usable in cursor mode (Tab) - in camera mode the
+  mouse turns the camera, and ImGui is not given it.
+*/
+internal void
+DrawDebugUI(game_state *State, dx12_renderer *Renderer)
+{
+    ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("clash");
+
+    ImGuiIO &IO = ImGui::GetIO();
+    ImGui::Text("%.2f ms  (%.0f fps)", 1000.0f / IO.Framerate, IO.Framerate);
+    ImGui::Text("%s", Renderer->GpuName);
+    ImGui::Text("feature level %d_%d, ray tracing %s, mesh shaders %s",
+                (Renderer->FeatureLevel >> 12) & 0xF, (Renderer->FeatureLevel >> 8) & 0xF,
+                Renderer->SupportsRaytracing ? "yes" : "no",
+                Renderer->SupportsMeshShaders ? "yes" : "no");
+
+    ImGui::Separator();
+    ImGui::ColorEdit3("clear colour", Renderer->ClearColor);
+
+    // ImGui wants a bool; game_state keeps b32s.
+    bool SoundOn = (State->SoundOn != 0);
+    if(ImGui::Checkbox("sound", &SoundOn))
+    {
+        State->SoundOn = SoundOn;
+    }
+
+    ImGui::SliderFloat("camera speed", &State->Camera.MovementSpeed,
+                       CAMERA_MIN_SPEED, CAMERA_MAX_SPEED);
+    ImGui::Text("camera  %.2f %.2f %.2f   yaw %.1f  pitch %.1f",
+                State->Camera.Position.X, State->Camera.Position.Y, State->Camera.Position.Z,
+                State->Camera.Yaw * (180.0f / Pi32), State->Camera.Pitch * (180.0f / Pi32));
+
+    ImGui::Separator();
+    bool ShowDemo = (State->ShowImGuiDemo != 0);
+    if(ImGui::Checkbox("Dear ImGui demo window", &ShowDemo))
+    {
+        State->ShowImGuiDemo = ShowDemo;
+    }
+    ImGui::TextDisabled("Tab frees the cursor to use these.");
+
+    ImGui::End();
+
+    if(State->ShowImGuiDemo)
+    {
+        bool Open = true;
+        ImGui::ShowDemoWindow(&Open);
+        State->ShowImGuiDemo = Open;
+    }
+}
 
 /*
   The renderer, started on first use.
@@ -89,6 +146,16 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     State->TimeSeconds += (r64)Input->dtForFrame;
 
+    // The renderer first, so Dear ImGui can start its frame before the
+    // camera reads the mouse - the camera has to know whether ImGui wants it.
+    dx12_renderer *Renderer = GetRenderer(Thread, Memory, Input);
+    State->Renderer = Renderer;
+    if(Renderer)
+    {
+        ImGuiBeginFrame(Renderer, Input);
+    }
+    b32 UIHasMouse = ImGuiWantsMouse(Renderer);
+
     // ------------------------------------------------------------------
     // Input
     // ------------------------------------------------------------------
@@ -104,7 +171,11 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
                                (r32)Input->MouseDeltaY);
     }
 
-    CameraProcessZoom(&State->Camera, (r32)Input->MouseZ);
+    // Not while the wheel is scrolling an ImGui window.
+    if(!UIHasMouse)
+    {
+        CameraProcessZoom(&State->Camera, (r32)Input->MouseZ);
+    }
 
     // Held keys: move every frame they are down, by speed times dt.
     if(Keyboard->MoveUp.EndedDown)    { CameraProcessMovement(&State->Camera, CameraMovement_Forward,  DeltaTime); }
@@ -156,8 +227,6 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     State->View = CameraGetViewMatrix(&State->Camera);
     State->Projection = Mat4Perspective(State->Camera.Zoom, Aspect, 0.1f, 500.0f);
 
-    dx12_renderer *Renderer = GetRenderer(Thread, Memory, Input);
-    State->Renderer = Renderer;
     if(!Renderer)
     {
         return;
@@ -168,6 +237,14 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
        (Input->WindowHeight != Renderer->Height))
     {
         RendererResize(Renderer, Thread, Memory, Input->WindowWidth, Input->WindowHeight);
+    }
+
+    // The debug UI.  ImGui::Render draws nothing itself - it builds the
+    // triangles, and RendererRender records them into the frame.
+    if(Renderer->ImGui)
+    {
+        DrawDebugUI(State, Renderer);
+        ImGui::Render();
     }
 
     RendererRender(Renderer, Input);
@@ -204,6 +281,38 @@ extern "C" GAME_SHUTDOWN(GameShutdown)
     dx12_renderer *Renderer = (dx12_renderer *)Memory->RendererStorage;
     if(Renderer && Renderer->IsInitialized)
     {
+        // ImGui first - it uses the renderer's device, queue and heap.
+        ImGuiStop(Renderer);
         RendererShutdown(Renderer);
     }
 }
+
+// Just before a hot reload.  The renderer carries on - its objects live in
+// Windows' DLLs - but Dear ImGui lives partly in ours.  See game_imgui.cpp.
+extern "C" GAME_UNLOAD(GameUnload)
+{
+    dx12_renderer *Renderer = (dx12_renderer *)Memory->RendererStorage;
+    if(Renderer && Renderer->IsInitialized)
+    {
+        ImGuiStop(Renderer);
+    }
+}
+
+/*
+  Dear ImGui 1.92.9b and its DX12 backend, compiled here as part of the unity
+  build - at warning level 0, since its warnings are not ours to fix.
+  imgui_demo.cpp is ImGui::ShowDemoWindow: every widget, with the code that
+  makes it.
+
+  NOTE(yigit): LAST in the file, on purpose.  These files #define things for
+  their own use (snprintf among them) that would otherwise leak into the
+  game's code after them.  Everything above only needs imgui.h.
+*/
+#pragma warning(push, 0)
+#include "external/imgui/imgui.cpp"
+#include "external/imgui/imgui_draw.cpp"
+#include "external/imgui/imgui_tables.cpp"
+#include "external/imgui/imgui_widgets.cpp"
+#include "external/imgui/imgui_demo.cpp"
+#include "external/imgui/backends/imgui_impl_dx12.cpp"
+#pragma warning(pop)

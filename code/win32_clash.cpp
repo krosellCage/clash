@@ -329,8 +329,11 @@ Win32LoadGameCode(char *SourceDLLName, char *TempDLLName)
             GetProcAddress(Result.GameCodeDLL, "GameGetSoundSamples");
         Result.Shutdown = (game_shutdown *)
             GetProcAddress(Result.GameCodeDLL, "GameShutdown");
+        Result.Unload = (game_unload *)
+            GetProcAddress(Result.GameCodeDLL, "GameUnload");
 
-        Result.IsValid = (Result.UpdateAndRender && Result.GetSoundSamples && Result.Shutdown);
+        Result.IsValid = (Result.UpdateAndRender && Result.GetSoundSamples &&
+                          Result.Shutdown && Result.Unload);
     }
 
     if(!Result.IsValid)
@@ -338,6 +341,7 @@ Win32LoadGameCode(char *SourceDLLName, char *TempDLLName)
         Result.UpdateAndRender = 0;
         Result.GetSoundSamples = 0;
         Result.Shutdown = 0;
+        Result.Unload = 0;
     }
 
     return(Result);
@@ -356,6 +360,7 @@ Win32UnloadGameCode(win32_game_code *GameCode)
     GameCode->UpdateAndRender = 0;
     GameCode->GetSoundSamples = 0;
     GameCode->Shutdown = 0;
+    GameCode->Unload = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,8 +1184,16 @@ WinMain(HINSTANCE Instance, HINSTANCE PrevInstance, LPSTR CommandLine, int ShowC
         b32 DLLBeingWritten = (GetFileAttributesA(GameCodeLockFullPath) != INVALID_FILE_ATTRIBUTES);
         if(!DLLBeingWritten && (CompareFileTime(&NewDLLWriteTime, &Game.DLLLastWriteTime) != 0))
         {
+            // The old DLL tears down what points into its own code first -
+            // after FreeLibrary there is nothing left to call.
+            if(Game.Unload)
+            {
+                thread_context Thread = {};
+                Game.Unload(&Thread, &GameMemory);
+            }
             Win32UnloadGameCode(&Game);
             Game = Win32LoadGameCode(SourceGameCodeDLLFullPath, TempGameCodeDLLFullPath);
+            OutputDebugStringA(Game.IsValid ? "game.dll reloaded\n" : "ERROR: game.dll reload failed\n");
         }
 
         Win32BeginInput(NewInput, OldInput);

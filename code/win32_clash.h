@@ -27,6 +27,7 @@ struct win32_game_code
     game_update_and_render *UpdateAndRender;
     game_get_sound_samples *GetSoundSamples;
     game_shutdown *Shutdown;
+    game_unload *Unload;
 
     b32 IsValid;
 };

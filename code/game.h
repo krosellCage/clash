@@ -42,6 +42,9 @@ struct game_state
     // a quiet test tone if not - so there is always something to hear.
     b32 SoundOn;
     loaded_sound Music;         // samples in WorldArena
+
+    // The debug UI's own switches (DrawDebugUI in game.cpp).
+    b32 ShowImGuiDemo;
     u32 MusicPlayCursor;        // which frame of Music plays next
     r32 TonePhase;              // where the test tone's sine wave is, 0..2pi
 
