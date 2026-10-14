@@ -167,7 +167,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     if((Input->WindowWidth != Renderer->Width) ||
        (Input->WindowHeight != Renderer->Height))
     {
-        RendererResize(Renderer, Input->WindowWidth, Input->WindowHeight);
+        RendererResize(Renderer, Thread, Memory, Input->WindowWidth, Input->WindowHeight);
     }
 
     RendererRender(Renderer, Input);

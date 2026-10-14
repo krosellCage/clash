@@ -117,6 +117,7 @@ RendererLog(thread_context *Thread, game_memory *Memory, const char *Message)
 
 // RendererInitialize calls it to clean up when it fails halfway.
 internal void RendererShutdown(dx12_renderer *Renderer);
+internal void FlushCommandQueue(dx12_renderer *Renderer);
 
 // Window is the HWND the swapchain draws into.  Returns false if DirectX 12
 // could not be started.
@@ -437,10 +438,43 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
 // Width and Height are the window's new INNER size - the part you draw into.
 // Never called with 0: the platform does not run the game while minimised.
 internal void
-RendererResize(dx12_renderer *Renderer, i32 Width, i32 Height)
+RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
+               i32 Width, i32 Height)
 {
     Renderer->Width = Width;
     Renderer->Height = Height;
+
+    if(!Renderer->SwapChain)
+    {
+        return;
+    }
+
+    // The GPU may still be drawing into, or presenting, the old buffers.
+    FlushCommandQueue(Renderer);
+
+    // IMPORTANT(yigit): ResizeBuffers fails while ANYTHING still holds one
+    // of the old buffers.  Once there are render target views (Luna 4.3.5),
+    // release the ID3D12Resource for every back buffer BEFORE this call,
+    // and make them and their RTVs again after it.
+    //
+    // 0 and DXGI_FORMAT_UNKNOWN keep the buffer count and the format.  The
+    // flags must be the ones the swap chain was made with, or tearing
+    // support is silently lost.
+    HRESULT Result = Renderer->SwapChain->ResizeBuffers(0, (UINT)Width, (UINT)Height,
+                                                        DXGI_FORMAT_UNKNOWN,
+                                                        Renderer->SwapChainFlags);
+
+    char Line[128];
+    if(FAILED(Result))
+    {
+        snprintf(Line, sizeof(Line), "ERROR: ResizeBuffers to %dx%d failed (0x%08X).\n",
+                 Width, Height, (u32)Result);
+    }
+    else
+    {
+        snprintf(Line, sizeof(Line), "swap chain resized to %dx%d\n", Width, Height);
+    }
+    RendererLog(Thread, Memory, Line);
 }
 
 // Input holds this frame's keyboard and mouse (see platform.h), and

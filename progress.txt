@@ -66,7 +66,8 @@ LOG
   Built  DirectX 12 Agility SDK 1.619.6 in code/external, copied to
          build/D3D12/ by build.bat, exported from clash.exe. The debug
          layer runs now (it was silently off), and the GPU reports
-         feature level 12_2 instead of 12_1.
+         feature level 12_2 instead of 12_1. RendererResize now
+         resizes the swap chain (milestone 3).
   Hours
   Next   Luna 4.3.5: RTV descriptor heap, clear the window to a colour,
          Present - the rest of milestone 2.
