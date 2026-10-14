@@ -1,0 +1,70 @@
+/*
+  NOTE(yigit): The debug UI - every Dear ImGui window the game shows.
+
+  This is where widgets are made.  Each call IS a widget: ImGui::Checkbox
+  draws the box this frame and returns true on the frame it is clicked -
+  there is nothing to create or keep.  Add a line here to add a control, or
+  a new function like DrawDebugUI for a new window, and call it from
+  GameUpdateAndRender between ImGuiBeginFrame and ImGui::Render.
+
+  The plumbing - starting ImGui, its input, its frame - is game_imgui.cpp.
+  To see what widgets there are, tick "Dear ImGui demo window": every
+  section of it is made by the code in external/imgui/imgui_demo.cpp.
+
+  Only usable in cursor mode (Tab) - in camera mode the mouse turns the
+  camera, and ImGui is not given it.
+*/
+
+// game_state, dx12_renderer and imgui.h.  game.cpp has already included it
+// before us, so in the build the include guard skips it - it is here so
+// this file makes sense on its own, to a reader and to the editor.
+#include "dx12_renderer.cpp"
+
+// The "clash" window: frame time, the GPU, and a few live settings.
+internal void
+DrawDebugUI(game_state *State, dx12_renderer *Renderer)
+{
+    ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("clash");
+
+    ImGuiIO &IO = ImGui::GetIO();
+    ImGui::Text("%.2f ms  (%.0f fps)", 1000.0f / IO.Framerate, IO.Framerate);
+    ImGui::Text("%s", Renderer->GpuName);
+    ImGui::Text("feature level %d_%d, ray tracing %s, mesh shaders %s",
+                (Renderer->FeatureLevel >> 12) & 0xF, (Renderer->FeatureLevel >> 8) & 0xF,
+                Renderer->SupportsRaytracing ? "yes" : "no",
+                Renderer->SupportsMeshShaders ? "yes" : "no");
+
+    ImGui::Separator();
+    ImGui::ColorEdit3("clear colour", Renderer->ClearColor);
+
+    // ImGui wants a bool; game_state keeps b32s.
+    bool SoundOn = (State->SoundOn != 0);
+    if(ImGui::Checkbox("sound", &SoundOn))
+    {
+        State->SoundOn = SoundOn;
+    }
+
+    ImGui::SliderFloat("camera speed", &State->Camera.MovementSpeed,
+                       CAMERA_MIN_SPEED, CAMERA_MAX_SPEED);
+    ImGui::Text("camera  %.2f %.2f %.2f   yaw %.1f  pitch %.1f",
+                State->Camera.Position.X, State->Camera.Position.Y, State->Camera.Position.Z,
+                State->Camera.Yaw * (180.0f / Pi32), State->Camera.Pitch * (180.0f / Pi32));
+
+    ImGui::Separator();
+    bool ShowDemo = (State->ShowImGuiDemo != 0);
+    if(ImGui::Checkbox("Dear ImGui demo window", &ShowDemo))
+    {
+        State->ShowImGuiDemo = ShowDemo;
+    }
+    ImGui::TextDisabled("Tab frees the cursor to use these.");
+
+    ImGui::End();
+
+    if(State->ShowImGuiDemo)
+    {
+        bool Open = true;
+        ImGui::ShowDemoWindow(&Open);
+        State->ShowImGuiDemo = Open;
+    }
+}
