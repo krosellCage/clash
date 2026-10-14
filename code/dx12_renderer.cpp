@@ -53,6 +53,25 @@
 // Two: one on screen, one being drawn into (double buffering).
 #define SWAP_CHAIN_BUFFER_COUNT 2
 
+/*
+  A descriptor heap (Luna 4.3.5) - an array of descriptors, one type per
+  heap, fixed in size when it is made.  Slot i lives at Start + i *
+  DescriptorSize, and the size differs between GPUs and between types, so it
+  is asked for once and kept.
+
+  Only CBV_SRV_UAV and SAMPLER heaps are shader visible - shaders read those.
+  RTVs and DSVs are only ever handed to commands, by their CPU handle, so
+  their heaps have no GPU handles at all.
+*/
+struct descriptor_heap
+{
+    ID3D12DescriptorHeap *Heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE CpuStart;   // looked up once, not on every use
+    D3D12_GPU_DESCRIPTOR_HANDLE GpuStart;   // 0 unless shader visible
+    u32 DescriptorSize;
+    u32 Count;
+};
+
 // Everything the renderer keeps from one frame to the next.  Add your
 // ID3D12Device *, swapchain, command queue and so on here.
 struct dx12_renderer
@@ -100,6 +119,13 @@ struct dx12_renderer
     // to use it, and ResizeBuffers must be given the same flags as creation.
     b32 SupportsTearing;
     UINT SwapChainFlags;
+
+    // The swap chain's buffers, and a render target view of each in RtvHeap
+    // slot i (Luna 4.3.6).  GetBuffer adds a reference, and ResizeBuffers
+    // fails while any is held - so these are released before every resize
+    // and fetched again after it.
+    ID3D12Resource *BackBuffers[SWAP_CHAIN_BUFFER_COUNT];
+    descriptor_heap RtvHeap;
 };
 
 // Every DirectX object is a COM object: Release it once, when done.  Zeroing
@@ -118,6 +144,94 @@ RendererLog(thread_context *Thread, game_memory *Memory, const char *Message)
 // RendererInitialize calls it to clean up when it fails halfway.
 internal void RendererShutdown(dx12_renderer *Renderer);
 internal void FlushCommandQueue(dx12_renderer *Renderer);
+
+internal b32
+DescriptorHeapInit(descriptor_heap *Heap, ID3D12Device *Device,
+                   D3D12_DESCRIPTOR_HEAP_TYPE Type, u32 Count)
+{
+    b32 ShaderVisible = ((Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) ||
+                         (Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER));
+
+    D3D12_DESCRIPTOR_HEAP_DESC Desc = {};
+    Desc.NumDescriptors = Count;
+    Desc.Type = Type;
+    Desc.Flags = ShaderVisible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+                               : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    Desc.NodeMask = 0;          // only for several GPUs linked together
+    if(FAILED(Device->CreateDescriptorHeap(&Desc, IID_PPV_ARGS(&Heap->Heap))))
+    {
+        return(false);
+    }
+
+    Heap->CpuStart = Heap->Heap->GetCPUDescriptorHandleForHeapStart();
+    if(ShaderVisible)
+    {
+        Heap->GpuStart = Heap->Heap->GetGPUDescriptorHandleForHeapStart();
+    }
+    Heap->DescriptorSize = Device->GetDescriptorHandleIncrementSize(Type);
+    Heap->Count = Count;
+
+    return(true);
+}
+
+// Where the CPU writes slot Index, and what commands like
+// ClearRenderTargetView take.
+inline D3D12_CPU_DESCRIPTOR_HANDLE
+DescriptorCpuHandle(descriptor_heap *Heap, u32 Index)
+{
+    Assert(Index < Heap->Count);
+    D3D12_CPU_DESCRIPTOR_HANDLE Result = Heap->CpuStart;
+    Result.ptr += (SIZE_T)Index * Heap->DescriptorSize;
+    return(Result);
+}
+
+// Takes the swap chain's buffers and writes a render target view of each
+// into the RTV heap.  After creation, and after every ResizeBuffers.
+internal b32
+AcquireBackBuffers(dx12_renderer *Renderer)
+{
+    for(u32 BufferIndex = 0; BufferIndex < SWAP_CHAIN_BUFFER_COUNT; ++BufferIndex)
+    {
+        if(FAILED(Renderer->SwapChain->GetBuffer(BufferIndex,
+                                                 IID_PPV_ARGS(&Renderer->BackBuffers[BufferIndex]))))
+        {
+            return(false);
+        }
+
+        // 0 for the view's description: view it exactly as it was made -
+        // the swap chain's format, mip level 0.
+        Renderer->Device->CreateRenderTargetView(Renderer->BackBuffers[BufferIndex], 0,
+                                                 DescriptorCpuHandle(&Renderer->RtvHeap, BufferIndex));
+    }
+
+    return(true);
+}
+
+// Gives back the references GetBuffer took.  The RTVs are left in the heap -
+// they are just data, and AcquireBackBuffers overwrites them.
+internal void
+ReleaseBackBuffers(dx12_renderer *Renderer)
+{
+    for(u32 BufferIndex = 0; BufferIndex < SWAP_CHAIN_BUFFER_COUNT; ++BufferIndex)
+    {
+        ReleaseAndZero(Renderer->BackBuffers[BufferIndex]);
+    }
+}
+
+// A barrier that moves a whole resource from one state to another.
+inline D3D12_RESOURCE_BARRIER
+TransitionBarrier(ID3D12Resource *Resource, D3D12_RESOURCE_STATES Before,
+                  D3D12_RESOURCE_STATES After)
+{
+    D3D12_RESOURCE_BARRIER Result = {};
+    Result.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    Result.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    Result.Transition.pResource = Resource;
+    Result.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    Result.Transition.StateBefore = Before;
+    Result.Transition.StateAfter = After;
+    return(Result);
+}
 
 // Window is the HWND the swapchain draws into.  Returns false if DirectX 12
 // could not be started.
@@ -432,6 +546,25 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     // would fight the platform's F11 one.
     Renderer->Factory->MakeWindowAssociation(Window, DXGI_MWA_NO_ALT_ENTER);
 
+    // ------------------------------------------------------------------
+    // The RTV heap - one slot per swap chain buffer - and a render target
+    // view of each buffer in it (Luna 4.3.5, 4.3.6).
+    // ------------------------------------------------------------------
+    if(!DescriptorHeapInit(&Renderer->RtvHeap, Renderer->Device,
+                           D3D12_DESCRIPTOR_HEAP_TYPE_RTV, SWAP_CHAIN_BUFFER_COUNT))
+    {
+        RendererLog(Thread, Memory, "ERROR: Could not make the RTV descriptor heap.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
+    if(!AcquireBackBuffers(Renderer))
+    {
+        RendererLog(Thread, Memory, "ERROR: Could not get the swap chain's buffers.\n");
+        RendererShutdown(Renderer);
+        return(false);
+    }
+
     return(true);
 }
 
@@ -453,10 +586,9 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     FlushCommandQueue(Renderer);
 
     // IMPORTANT(yigit): ResizeBuffers fails while ANYTHING still holds one
-    // of the old buffers.  Once there are render target views (Luna 4.3.5),
-    // release the ID3D12Resource for every back buffer BEFORE this call,
-    // and make them and their RTVs again after it.
-    //
+    // of the old buffers - so ours go first, and come back after.
+    ReleaseBackBuffers(Renderer);
+
     // 0 and DXGI_FORMAT_UNKNOWN keep the buffer count and the format.  The
     // flags must be the ones the swap chain was made with, or tearing
     // support is silently lost.
@@ -475,6 +607,13 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         snprintf(Line, sizeof(Line), "swap chain resized to %dx%d\n", Width, Height);
     }
     RendererLog(Thread, Memory, Line);
+
+    // New buffers, so new views - written over the old ones, same slots.
+    // If the resize failed, these are the old buffers again.
+    if(!AcquireBackBuffers(Renderer))
+    {
+        RendererLog(Thread, Memory, "ERROR: Could not get the swap chain's buffers after a resize.\n");
+    }
 }
 
 // Input holds this frame's keyboard and mouse (see platform.h), and
@@ -482,6 +621,55 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 internal void
 RendererRender(dx12_renderer *Renderer, game_input *Input)
 {
+    if(!Renderer->SwapChain || !Renderer->BackBuffers[0])
+    {
+        return;
+    }
+
+    // Last frame ended with a flush, so the GPU is done with everything in
+    // the allocator - safe to reuse its memory.  Then start recording.
+    Renderer->CommandAllocator->Reset();
+    Renderer->CommandList->Reset(Renderer->CommandAllocator, 0);
+
+    // With the flip model, the buffer to draw into is not always number 0.
+    u32 BackBufferIndex = Renderer->SwapChain->GetCurrentBackBufferIndex();
+    ID3D12Resource *BackBuffer = Renderer->BackBuffers[BackBufferIndex];
+
+    // A resource is in one state at a time, and the GPU must be told when it
+    // changes - it may need to finish reads, flush caches or change how the
+    // memory is laid out first.  The buffer comes back from the screen in
+    // PRESENT; drawing into it needs RENDER_TARGET.
+    D3D12_RESOURCE_BARRIER ToRenderTarget =
+        TransitionBarrier(BackBuffer, D3D12_RESOURCE_STATE_PRESENT,
+                          D3D12_RESOURCE_STATE_RENDER_TARGET);
+    Renderer->CommandList->ResourceBarrier(1, &ToRenderTarget);
+
+    // Hot pink: 255, 105, 180.
+    r32 ClearColor[4] = {1.0f, 0.41f, 0.71f, 1.0f};
+    Renderer->CommandList->ClearRenderTargetView(DescriptorCpuHandle(&Renderer->RtvHeap, BackBufferIndex),
+                                                 ClearColor, 0, 0);
+
+    // And back to PRESENT, the only state Present accepts.
+    D3D12_RESOURCE_BARRIER ToPresent =
+        TransitionBarrier(BackBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                          D3D12_RESOURCE_STATE_PRESENT);
+    Renderer->CommandList->ResourceBarrier(1, &ToPresent);
+
+    Renderer->CommandList->Close();
+    ID3D12CommandList *Lists[] = {Renderer->CommandList};
+    Renderer->Queue->ExecuteCommandLists(1, Lists);
+
+    // Sync interval 1: wait for the monitor's next refresh (vsync).  The
+    // platform has no frame limiter of its own, so this is what paces the
+    // game.  Vsync off would be Present(0, DXGI_PRESENT_ALLOW_TEARING) when
+    // Renderer->SupportsTearing - but only with a frame limiter, or the
+    // loop runs at thousands of frames a second.
+    Renderer->SwapChain->Present(1, 0);
+
+    // NOTE(yigit): Waits for the GPU every frame, so the CPU and GPU take
+    // turns instead of working at the same time.  Luna chapter 7 fixes this
+    // with frames in flight.
+    FlushCommandQueue(Renderer);
 }
 
 // Waits until the GPU has finished everything queued so far.
@@ -522,6 +710,8 @@ RendererShutdown(dx12_renderer *Renderer)
 
     //NOTE(yigit): Order matters. Newest first.
 
+    ReleaseBackBuffers(Renderer);
+    ReleaseAndZero(Renderer->RtvHeap.Heap);
     ReleaseAndZero(Renderer->SwapChain);
     ReleaseAndZero(Renderer->CommandList);
     ReleaseAndZero(Renderer->CommandAllocator);

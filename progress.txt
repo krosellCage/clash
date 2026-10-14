@@ -61,13 +61,15 @@ LOG
          window to a colour, Present - the rest of milestone 2.
 
 2026-10-15
-  Read
+  Read   Luna 4.3.5 descriptor heaps, 4.3.6 render target views
   Watch
   Built  DirectX 12 Agility SDK 1.619.6 in code/external, copied to
          build/D3D12/ by build.bat, exported from clash.exe. The debug
          layer runs now (it was silently off), and the GPU reports
          feature level 12_2 instead of 12_1. RendererResize now
-         resizes the swap chain (milestone 3).
+         resizes the swap chain (milestone 3). Luna 4.3.5-4.3.6: RTV
+         descriptor heap and back buffer views; the window clears to
+         pink every frame, through resizes (milestone 2 done).
   Hours
-  Next   Luna 4.3.5: RTV descriptor heap, clear the window to a colour,
-         Present - the rest of milestone 2.
+  Next   Luna 4.3.7: depth/stencil buffer and view. Then milestone 4 - a
+         triangle: root signature, pipeline state, vertex buffer, shader.
