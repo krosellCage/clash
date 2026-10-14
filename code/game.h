@@ -22,7 +22,12 @@ struct game_state
     // rather than read off a clock.  dtForFrame travels inside game_input,
     // which input recording saves every frame, so time built this way plays
     // back exactly.
-    r32 TimeSeconds;
+    //
+    // r64, not r32: a float's steps grow with its size - past 2048 seconds
+    // they are 0.000244 s, and a 144 Hz dt added to it rounds to 1.5% too
+    // little every frame, so the clock runs slow inside one match.  A double
+    // stays exact for years.  dtForFrame itself can stay r32.
+    r64 TimeSeconds;
 
     // NOTE(yigit): By value, in PermanentStorage - so it survives a DLL
     // reload, and input playback puts it back where the loop started.

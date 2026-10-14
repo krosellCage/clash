@@ -87,7 +87,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         Memory->IsInitialized = true;
     }
 
-    State->TimeSeconds += Input->dtForFrame;
+    State->TimeSeconds += (r64)Input->dtForFrame;
 
     // ------------------------------------------------------------------
     // Input

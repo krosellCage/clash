@@ -74,7 +74,8 @@ LOG
          buffer: D32_FLOAT, DSV heap, made straight into DEPTH_WRITE,
          rebuilt on resize, cleared and bound with OMSetRenderTargets
          every frame. Viewport and scissor set to the whole back buffer
-         every frame.
+         every frame. game_state::TimeSeconds is r64 now (r32
+         drifted ~1.5% after 2048 s).
   Hours
   Next   Milestone 4 - a triangle: root signature, pipeline state,
          vertex buffer, shader (Luna chapter 6).
