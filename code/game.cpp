@@ -198,7 +198,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         ImGui::Render();
     }
 
-    RendererRender(Renderer, Input);
+    RendererRender(Renderer, Thread, Memory, Input);
 }
 
 extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)

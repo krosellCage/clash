@@ -78,7 +78,10 @@ LOG
          drifted ~1.5% after 2048 s). Dear ImGui 1.92.9b: debug window
          (frame time, GPU, clear colour, sound, camera speed, demo
          window), input from game_input, stopped in a new GameUnload
-         export before every hot reload and restarted after it.
+         export before every hot reload and restarted after it. Depth
+         buffer now D32_FLOAT_S8X24_UINT, stencil cleared each frame.
+         DX12_FAILED macro logs file, line, call and Windows' reason.
+         VRAM budget/usage panel in the debug window.
   Hours
   Next   Milestone 4 - a triangle: root signature, pipeline state,
          vertex buffer, shader (Luna chapter 6).

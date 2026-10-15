@@ -24,8 +24,10 @@
 internal void
 DrawDebugUI(game_state *State, dx12_renderer *Renderer)
 {
+    // Always as big as what is in it - so adding a line here never leaves
+    // it hidden behind a scroll bar in a size remembered from imgui.ini.
     ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
-    ImGui::Begin("clash");
+    ImGui::Begin("clash", 0, ImGuiWindowFlags_AlwaysAutoResize);
 
     ImGuiIO &IO = ImGui::GetIO();
     ImGui::Text("%.2f ms  (%.0f fps)", 1000.0f / IO.Framerate, IO.Framerate);
@@ -34,6 +36,28 @@ DrawDebugUI(game_state *State, dx12_renderer *Renderer)
                 (Renderer->FeatureLevel >> 12) & 0xF, (Renderer->FeatureLevel >> 8) & 0xF,
                 Renderer->SupportsRaytracing ? "yes" : "no",
                 Renderer->SupportsMeshShaders ? "yes" : "no");
+
+    // Video memory - see RendererGetVideoMemory for what the numbers mean.
+    // Cheap enough to ask every frame.
+    DXGI_QUERY_VIDEO_MEMORY_INFO Local, NonLocal;
+    if(ImGui::CollapsingHeader("video memory", ImGuiTreeNodeFlags_DefaultOpen) &&
+       RendererGetVideoMemory(Renderer, &Local, &NonLocal))
+    {
+        r32 ToMB = 1.0f / (1024.0f*1024.0f);
+
+        // The bar is this process's VRAM against its budget - near the end,
+        // and loading more starts to stutter.
+        r32 Used = (Local.Budget > 0) ? ((r32)Local.CurrentUsage / (r32)Local.Budget) : 0.0f;
+        char Overlay[64];
+        snprintf(Overlay, sizeof(Overlay), "%.0f / %.0f MB",
+                 (r32)Local.CurrentUsage*ToMB, (r32)Local.Budget*ToMB);
+        ImGui::ProgressBar(Used, ImVec2(-1.0f, 0.0f), Overlay);
+
+        ImGui::Text("VRAM budget %.0f MB of %.0f MB on the card",
+                    (r32)Local.Budget*ToMB, (r32)Renderer->DedicatedVideoMemory*ToMB);
+        ImGui::Text("shared (system RAM) %.0f / %.0f MB",
+                    (r32)NonLocal.CurrentUsage*ToMB, (r32)NonLocal.Budget*ToMB);
+    }
 
     ImGui::Separator();
     ImGui::ColorEdit3("clear colour", Renderer->ClearColor);

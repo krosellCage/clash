@@ -75,16 +75,21 @@
 // it: Dear ImGui's font texture now, the game's textures from milestone 6.
 #define SRV_HEAP_CAPACITY 1024
 
-// The depth buffer (Luna 4.3.7): 32-bit float depth, no stencil - nothing
-// uses stencil yet, and D24_UNORM_S8_UINT has less precision far away.
+// The depth/stencil buffer (Luna 4.3.7): 32-bit float depth, plus 8 bits of
+// stencil per pixel - a mask for outlines around selected heroes, decals and
+// the like.  The other 24 bits are unused padding.  Not Luna's
+// D24_UNORM_S8_UINT: 24-bit depth has too little precision far away, and
+// reversed-Z needs float depth.  (Most GPUs store the two parts separately,
+// so the padding costs less than its 64 bits a pixel suggest.)
 //
 // TODO(yigit): Reversed-Z, before the scene gets big.  A third-person
 // camera sees from the hero's feet to the horizon, and normal depth spends
 // almost all its precision near the camera - far things z-fight.  Reversed-Z
 // stores 1 at the near plane and 0 at the far one: clear to 0.0f, test with
 // GREATER, and swap near and far in the projection matrix.
-#define DEPTH_FORMAT      DXGI_FORMAT_D32_FLOAT
-#define DEPTH_CLEAR_VALUE 1.0f      // the far plane
+#define DEPTH_FORMAT        DXGI_FORMAT_D32_FLOAT_S8X24_UINT
+#define DEPTH_CLEAR_VALUE   1.0f    // the far plane
+#define STENCIL_CLEAR_VALUE 0       // no pixel marked
 
 /*
   A descriptor heap (Luna 4.3.5) - an array of descriptors, one type per
@@ -182,6 +187,8 @@ struct dx12_renderer
     // Things the debug UI shows and edits.
     r32 ClearColor[4];
     char GpuName[128];
+    u64 DedicatedVideoMemory;   // bytes of VRAM on the card
+    IDXGIAdapter3 *Adapter3;    // the same GPU, for QueryVideoMemoryInfo; may be 0
 };
 
 // Every DirectX object is a COM object: Release it once, when done.  Zeroing
@@ -197,13 +204,60 @@ RendererLog(thread_context *Thread, game_memory *Memory, const char *Message)
 #endif
 }
 
+/*
+  DX12_FAILED(Call) - Luna's ThrowIfFailed (4.6), without the exception.
+  Runs Call, and if its HRESULT is a failure, logs where and why:
+
+    ERROR: C:\clash\code\dx12_renderer.cpp(590): Renderer->Device->CreateFence(...)
+           failed with 0x80070057: The parameter is incorrect.
+
+  and is true - so it reads as "if this failed":
+    if(DX12_FAILED(Device->CreateFence(...))) { ...clean up...; return(false); }
+
+  A macro, not a function, for the same reasons as Luna's: __FILE__ and
+  __LINE__ must be the caller's, and #Call turns the call itself into text.
+  IMPORTANT(yigit): It logs through Thread and Memory - so it can only be
+  used where variables of those names are in scope.
+*/
+internal b32
+DX12LogIfFailed(HRESULT Result, const char *Call, const char *File, int LineNumber,
+                thread_context *Thread, game_memory *Memory)
+{
+    b32 Failed = FAILED(Result);
+    if(Failed)
+    {
+        // Windows' own words for the error, minus the line break it ends with.
+        char Reason[256] = {};
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0,
+                       (DWORD)Result, 0, Reason, sizeof(Reason), 0);
+        for(char *At = Reason; *At; ++At)
+        {
+            if((*At == '\r') || (*At == '\n'))
+            {
+                *At = 0;
+                break;
+            }
+        }
+
+        char Line[1024];
+        snprintf(Line, sizeof(Line), "ERROR: %s(%d): %s\n       failed with 0x%08X: %s\n",
+                 File, LineNumber, Call, (u32)Result,
+                 Reason[0] ? Reason : "(Windows has no description for this code)");
+        RendererLog(Thread, Memory, Line);
+    }
+    return(Failed);
+}
+
+#define DX12_FAILED(Call) DX12LogIfFailed((Call), #Call, __FILE__, __LINE__, Thread, Memory)
+
 // RendererInitialize calls it to clean up when it fails halfway.
 internal void RendererShutdown(dx12_renderer *Renderer);
 internal void FlushCommandQueue(dx12_renderer *Renderer);
 
 internal b32
 DescriptorHeapInit(descriptor_heap *Heap, ID3D12Device *Device,
-                   D3D12_DESCRIPTOR_HEAP_TYPE Type, u32 Count)
+                   D3D12_DESCRIPTOR_HEAP_TYPE Type, u32 Count,
+                   thread_context *Thread, game_memory *Memory)
 {
     b32 ShaderVisible = ((Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) ||
                          (Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER));
@@ -214,7 +268,7 @@ DescriptorHeapInit(descriptor_heap *Heap, ID3D12Device *Device,
     Desc.Flags = ShaderVisible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
                                : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     Desc.NodeMask = 0;          // only for several GPUs linked together
-    if(FAILED(Device->CreateDescriptorHeap(&Desc, IID_PPV_ARGS(&Heap->Heap))))
+    if(DX12_FAILED(Device->CreateDescriptorHeap(&Desc, IID_PPV_ARGS(&Heap->Heap))))
     {
         return(false);
     }
@@ -284,12 +338,12 @@ SrvRelease(dx12_renderer *Renderer, u32 Index)
 // Takes the swap chain's buffers and writes a render target view of each
 // into the RTV heap.  After creation, and after every ResizeBuffers.
 internal b32
-AcquireBackBuffers(dx12_renderer *Renderer)
+AcquireBackBuffers(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
 {
     for(u32 BufferIndex = 0; BufferIndex < SWAP_CHAIN_BUFFER_COUNT; ++BufferIndex)
     {
-        if(FAILED(Renderer->SwapChain->GetBuffer(BufferIndex,
-                                                 IID_PPV_ARGS(&Renderer->BackBuffers[BufferIndex]))))
+        if(DX12_FAILED(Renderer->SwapChain->GetBuffer(BufferIndex,
+                                                      IID_PPV_ARGS(&Renderer->BackBuffers[BufferIndex]))))
         {
             return(false);
         }
@@ -317,7 +371,8 @@ ReleaseBackBuffers(dx12_renderer *Renderer)
 // Makes the depth buffer at this size, and writes its view into DsvHeap
 // slot 0.  At startup, and after every resize.
 internal b32
-CreateDepthBuffer(dx12_renderer *Renderer, i32 Width, i32 Height)
+CreateDepthBuffer(dx12_renderer *Renderer, i32 Width, i32 Height,
+                  thread_context *Thread, game_memory *Memory)
 {
     // DEFAULT: in VRAM, where only the GPU reads and writes it.
     D3D12_HEAP_PROPERTIES HeapProperties = {};
@@ -337,19 +392,19 @@ CreateDepthBuffer(dx12_renderer *Renderer, i32 Width, i32 Height)
     Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
     // A clear with exactly these values can be faster - and the per-frame
-    // clear uses the same DEPTH_CLEAR_VALUE, or the debug layer warns.
+    // clear uses the same two values, or the debug layer warns.
     D3D12_CLEAR_VALUE OptimizedClear = {};
     OptimizedClear.Format = DEPTH_FORMAT;
     OptimizedClear.DepthStencil.Depth = DEPTH_CLEAR_VALUE;
-    OptimizedClear.DepthStencil.Stencil = 0;
+    OptimizedClear.DepthStencil.Stencil = STENCIL_CLEAR_VALUE;
 
     // "Committed": the memory and the resource made together, in one call.
     // Made straight into DEPTH_WRITE - unlike Luna's COMMON-then-barrier -
-    // since depth testing is all it is ever used for.
-    if(FAILED(Renderer->Device->CreateCommittedResource(&HeapProperties, D3D12_HEAP_FLAG_NONE,
-                                                        &Desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
-                                                        &OptimizedClear,
-                                                        IID_PPV_ARGS(&Renderer->DepthBuffer))))
+    // since depth and stencil testing is all it is ever used for.
+    if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&HeapProperties, D3D12_HEAP_FLAG_NONE,
+                                                             &Desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                                             &OptimizedClear,
+                                                             IID_PPV_ARGS(&Renderer->DepthBuffer))))
     {
         return(false);
     }
@@ -415,9 +470,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     FactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
 #endif
 
-    if(FAILED(CreateDXGIFactory2(FactoryFlags, IID_PPV_ARGS(&Renderer->Factory))))
+    if(DX12_FAILED(CreateDXGIFactory2(FactoryFlags, IID_PPV_ARGS(&Renderer->Factory))))
     {
-        RendererLog(Thread, Memory, "ERROR: CreateDXGIFactory2 failed.\n");
         return(false);
     }
 
@@ -538,6 +592,11 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
 
     // Kept for the debug UI.
     snprintf(Renderer->GpuName, sizeof(Renderer->GpuName), "%ls", Desc.Description);
+    Renderer->DedicatedVideoMemory = (u64)Desc.DedicatedVideoMemory;
+
+    // Version 3 of the adapter has QueryVideoMemoryInfo, for the debug UI's
+    // VRAM read-out.  Optional - without it there is just no read-out.
+    Renderer->Adapter->QueryInterface(IID_PPV_ARGS(&Renderer->Adapter3));
 
     // The Agility SDK (see the top of win32_clash.cpp).  The exe's export
     // says which runtime version to load; these headers were written for
@@ -568,10 +627,9 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     snprintf(Line, sizeof(Line), "D3D12 runtime: %s\n", Core ? CorePath : "D3D12Core.dll not loaded");
     RendererLog(Thread, Memory, Line);
 
-    if(FAILED(Renderer->Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+    if(DX12_FAILED(Renderer->Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                     IID_PPV_ARGS(&Renderer->Fence))))
     {
-        RendererLog(Thread, Memory, "ERROR: CreateFence failed.\n");
         RendererShutdown(Renderer);
         return(false);
     }
@@ -594,30 +652,27 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     D3D12_COMMAND_QUEUE_DESC QueueDesc = {};
     QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     QueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    if(FAILED(Renderer->Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Renderer->Queue))))
+    if(DX12_FAILED(Renderer->Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Renderer->Queue))))
     {
-        RendererLog(Thread, Memory, "ERROR: CreateCommandQueue failed.\n");
         RendererShutdown(Renderer);
         return(false);
     }
 
     // The memory recorded commands live in.  It must not be Reset until
     // the GPU has finished every command in it - FlushCommandQueue first.
-    if(FAILED(Renderer->Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                       IID_PPV_ARGS(&Renderer->CommandAllocator))))
+    if(DX12_FAILED(Renderer->Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                            IID_PPV_ARGS(&Renderer->CommandAllocator))))
     {
-        RendererLog(Thread, Memory, "ERROR: CreateCommandAllocator failed.\n");
         RendererShutdown(Renderer);
         return(false);
     }
 
     // 0: the first (only) GPU.  No pipeline state yet - nothing is drawn
     // with one until milestone 4, and it can be set while recording.
-    if(FAILED(Renderer->Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                  Renderer->CommandAllocator, 0,
-                                                  IID_PPV_ARGS(&Renderer->CommandList))))
+    if(DX12_FAILED(Renderer->Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                       Renderer->CommandAllocator, 0,
+                                                       IID_PPV_ARGS(&Renderer->CommandList))))
     {
-        RendererLog(Thread, Memory, "ERROR: CreateCommandList failed.\n");
         RendererShutdown(Renderer);
         return(false);
     }
@@ -670,20 +725,18 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     // after the work submitted before it.  The two zeros: no fullscreen
     // settings (windowed), and any monitor may show it.
     IDXGISwapChain1 *SwapChain1 = 0;
-    if(FAILED(Renderer->Factory->CreateSwapChainForHwnd(Renderer->Queue, Window, &SwapDesc,
-                                                        0, 0, &SwapChain1)))
+    if(DX12_FAILED(Renderer->Factory->CreateSwapChainForHwnd(Renderer->Queue, Window, &SwapDesc,
+                                                             0, 0, &SwapChain1)))
     {
-        RendererLog(Thread, Memory, "ERROR: CreateSwapChainForHwnd failed.\n");
         RendererShutdown(Renderer);
         return(false);
     }
 
     // Up to version 3, for GetCurrentBackBufferIndex.
-    HRESULT SwapChainResult = SwapChain1->QueryInterface(IID_PPV_ARGS(&Renderer->SwapChain));
+    b32 NoSwapChain3 = DX12_FAILED(SwapChain1->QueryInterface(IID_PPV_ARGS(&Renderer->SwapChain)));
     SwapChain1->Release();
-    if(FAILED(SwapChainResult))
+    if(NoSwapChain3)
     {
-        RendererLog(Thread, Memory, "ERROR: No IDXGISwapChain3 - Windows is too old.\n");
         RendererShutdown(Renderer);
         return(false);
     }
@@ -697,14 +750,15 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     // view of each buffer in it (Luna 4.3.5, 4.3.6).
     // ------------------------------------------------------------------
     if(!DescriptorHeapInit(&Renderer->RtvHeap, Renderer->Device,
-                           D3D12_DESCRIPTOR_HEAP_TYPE_RTV, SWAP_CHAIN_BUFFER_COUNT))
+                           D3D12_DESCRIPTOR_HEAP_TYPE_RTV, SWAP_CHAIN_BUFFER_COUNT,
+                           Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: Could not make the RTV descriptor heap.\n");
         RendererShutdown(Renderer);
         return(false);
     }
 
-    if(!AcquireBackBuffers(Renderer))
+    if(!AcquireBackBuffers(Renderer, Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: Could not get the swap chain's buffers.\n");
         RendererShutdown(Renderer);
@@ -712,17 +766,18 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     }
 
     // ------------------------------------------------------------------
-    // The depth buffer, and a one-slot DSV heap for its view (Luna 4.3.7).
+    // The depth/stencil buffer, and a one-slot DSV heap for its view (Luna
+    // 4.3.7).
     // ------------------------------------------------------------------
     if(!DescriptorHeapInit(&Renderer->DsvHeap, Renderer->Device,
-                           D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1))
+                           D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: Could not make the DSV descriptor heap.\n");
         RendererShutdown(Renderer);
         return(false);
     }
 
-    if(!CreateDepthBuffer(Renderer, Width, Height))
+    if(!CreateDepthBuffer(Renderer, Width, Height, Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: Could not make the depth buffer.\n");
         RendererShutdown(Renderer);
@@ -734,7 +789,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     // time, so this one heap holds everything shaders read.
     // ------------------------------------------------------------------
     if(!DescriptorHeapInit(&Renderer->SrvHeap, Renderer->Device,
-                           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, SRV_HEAP_CAPACITY))
+                           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, SRV_HEAP_CAPACITY,
+                           Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: Could not make the shader-visible descriptor heap.\n");
         RendererShutdown(Renderer);
@@ -776,25 +832,18 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     // 0 and DXGI_FORMAT_UNKNOWN keep the buffer count and the format.  The
     // flags must be the ones the swap chain was made with, or tearing
     // support is silently lost.
-    HRESULT Result = Renderer->SwapChain->ResizeBuffers(0, (UINT)Width, (UINT)Height,
-                                                        DXGI_FORMAT_UNKNOWN,
-                                                        Renderer->SwapChainFlags);
-
-    char Line[128];
-    if(FAILED(Result))
+    if(!DX12_FAILED(Renderer->SwapChain->ResizeBuffers(0, (UINT)Width, (UINT)Height,
+                                                       DXGI_FORMAT_UNKNOWN,
+                                                       Renderer->SwapChainFlags)))
     {
-        snprintf(Line, sizeof(Line), "ERROR: ResizeBuffers to %dx%d failed (0x%08X).\n",
-                 Width, Height, (u32)Result);
-    }
-    else
-    {
+        char Line[128];
         snprintf(Line, sizeof(Line), "swap chain resized to %dx%d\n", Width, Height);
+        RendererLog(Thread, Memory, Line);
     }
-    RendererLog(Thread, Memory, Line);
 
     // New buffers, so new views - written over the old ones, same slots.
     // If the resize failed, these are the old buffers again.
-    if(!AcquireBackBuffers(Renderer))
+    if(!AcquireBackBuffers(Renderer, Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: Could not get the swap chain's buffers after a resize.\n");
     }
@@ -802,7 +851,7 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     // ResizeBuffers only resizes the swap chain's own buffers.  The depth
     // buffer is ours: a new one at the new size, its view in the same slot.
     ReleaseAndZero(Renderer->DepthBuffer);
-    if(!CreateDepthBuffer(Renderer, Width, Height))
+    if(!CreateDepthBuffer(Renderer, Width, Height, Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: Could not make the depth buffer after a resize.\n");
     }
@@ -811,7 +860,8 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 // Input holds this frame's keyboard and mouse (see platform.h), and
 // Input->dtForFrame how long the last frame took, for anything that moves.
 internal void
-RendererRender(dx12_renderer *Renderer, game_input *Input)
+RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
+               game_input *Input)
 {
     if(!Renderer->SwapChain || !Renderer->BackBuffers[0] || !Renderer->DepthBuffer)
     {
@@ -819,9 +869,13 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
     }
 
     // Last frame ended with a flush, so the GPU is done with everything in
-    // the allocator - safe to reuse its memory.  Then start recording.
-    Renderer->CommandAllocator->Reset();
-    Renderer->CommandList->Reset(Renderer->CommandAllocator, 0);
+    // the allocator - safe to reuse its memory.  Then start recording.  If
+    // either fails, there is nothing to record into this frame.
+    if(DX12_FAILED(Renderer->CommandAllocator->Reset()) ||
+       DX12_FAILED(Renderer->CommandList->Reset(Renderer->CommandAllocator, 0)))
+    {
+        return;
+    }
 
     // With the flip model, the buffer to draw into is not always number 0.
     u32 BackBufferIndex = Renderer->SwapChain->GetCurrentBackBufferIndex();
@@ -842,10 +896,10 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
     // Hot pink to start with - the debug UI can change it.
     Renderer->CommandList->ClearRenderTargetView(Rtv, Renderer->ClearColor, 0, 0);
 
-    // Every pixel starts at the far plane, so anything drawn is in front.
-    // Depth only - there is no stencil in DEPTH_FORMAT.
-    Renderer->CommandList->ClearDepthStencilView(Dsv, D3D12_CLEAR_FLAG_DEPTH,
-                                                 DEPTH_CLEAR_VALUE, 0, 0, 0);
+    // Every pixel starts at the far plane, so anything drawn is in front,
+    // and with no stencil mark.  Both flags clear both parts in one call.
+    Renderer->CommandList->ClearDepthStencilView(Dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                                 DEPTH_CLEAR_VALUE, STENCIL_CLEAR_VALUE, 0, 0);
 
     // "Output merger": the colour image and the depth buffer the next draws
     // write into.
@@ -893,7 +947,12 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
                           D3D12_RESOURCE_STATE_PRESENT);
     Renderer->CommandList->ResourceBarrier(1, &ToPresent);
 
-    Renderer->CommandList->Close();
+    // A list that fails to close has a mistake recorded in it - the debug
+    // layer says which - and must not be run.
+    if(DX12_FAILED(Renderer->CommandList->Close()))
+    {
+        return;
+    }
     ID3D12CommandList *Lists[] = {Renderer->CommandList};
     Renderer->Queue->ExecuteCommandLists(1, Lists);
 
@@ -902,11 +961,37 @@ RendererRender(dx12_renderer *Renderer, game_input *Input)
     // game.  Vsync off would be Present(0, DXGI_PRESENT_ALLOW_TEARING) when
     // Renderer->SupportsTearing - but only with a frame limiter, or the
     // loop runs at thousands of frames a second.
-    Renderer->SwapChain->Present(1, 0);
+    DX12_FAILED(Renderer->SwapChain->Present(1, 0));
 
     // NOTE(yigit): Waits for the GPU every frame, so the CPU and GPU take
     // turns instead of working at the same time.
     FlushCommandQueue(Renderer);
+}
+
+/*
+  How much video memory this process uses, against what Windows lets it use.
+
+  Local is the card's own VRAM; NonLocal is system RAM the GPU reaches over
+  PCI Express ("shared").  In each:
+    Budget        what Windows will let THIS process use right now.  Less
+                  than the card has - other programs and the desktop need
+                  some - and it changes as they come and go.
+    CurrentUsage  what this process is using.  Past the budget, Windows
+                  starts moving our memory out to RAM: stutters.
+  False if the adapter cannot answer (no IDXGIAdapter3).
+*/
+internal b32
+RendererGetVideoMemory(dx12_renderer *Renderer, DXGI_QUERY_VIDEO_MEMORY_INFO *Local,
+                       DXGI_QUERY_VIDEO_MEMORY_INFO *NonLocal)
+{
+    b32 Result = false;
+    if(Renderer->Adapter3)
+    {
+        // 0: the first (only) GPU node.
+        Result = (SUCCEEDED(Renderer->Adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, Local)) &&
+                  SUCCEEDED(Renderer->Adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, NonLocal)));
+    }
+    return(Result);
 }
 
 // Waits until the GPU has finished everything queued so far.
@@ -960,6 +1045,7 @@ RendererShutdown(dx12_renderer *Renderer)
     ReleaseAndZero(Renderer->CommandAllocator);
     ReleaseAndZero(Renderer->Queue);
     ReleaseAndZero(Renderer->Fence);
+    ReleaseAndZero(Renderer->Adapter3);
     ReleaseAndZero(Renderer->Device5);
     ReleaseAndZero(Renderer->Device);
     ReleaseAndZero(Renderer->Adapter);
