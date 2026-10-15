@@ -87,3 +87,17 @@ LOG
   Hours
   Next   Milestone 4 - a triangle: root signature, pipeline state,
          vertex buffer, shader (Luna chapter 6).
+
+2026-10-16
+  Read   Luna chapter 5 (exercises skipped - they come back in chapters
+         6, 15, 16, 17, 20, 21), chapter 6 "Drawing in Direct3D"
+  Watch
+  Built  DXC v1.9.2609 in code/external/dxc, loaded at run time.
+         Milestone 4: the first triangle - typed by hand - with its
+         shader in data/shaders/triangle.hlsl: root signature, pipeline
+         state object, an upload-heap vertex buffer, DrawInstanced.
+  Hours
+  Next   Milestone 5, the cube: an index buffer, a DEFAULT-heap vertex
+         buffer with a proper upload, a constant buffer with the
+         camera's matrices.  Chapter 6 exercises 4, 7, 8 and 9 along the
+         way.

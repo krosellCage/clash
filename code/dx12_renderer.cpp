@@ -51,9 +51,11 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
+#include "dxcapi.h"
 
 #include <stdio.h>      // snprintf, for the log lines
-
+#include <string.h>     // memcpy
+                        
 // Dear ImGui's API and its DX12 backend (see game_imgui.cpp).  Level 0: its
 // headers are not ours to keep free of -W4 warnings.  The old pre-1.91.5
 // API is switched off, so Luna's ImGui_ImplDX12_Init call cannot creep in.
@@ -101,6 +103,13 @@
   RTVs and DSVs are only ever handed to commands, by their CPU handle, so
   their heaps have no GPU handles at all.
 */
+
+struct color_vertex
+{
+    XMFLOAT3 Position;
+    XMFLOAT4 Color;
+};
+
 struct descriptor_heap
 {
     ID3D12DescriptorHeap *Heap;
@@ -178,6 +187,17 @@ struct dx12_renderer
     u32 SrvNextUnused;
     u32 SrvFreeCount;
     u32 SrvFreeList[SRV_HEAP_CAPACITY];
+
+    HMODULE DxcModule;
+    IDxcUtils *DxcUtils;            // loads files
+    IDxcCompiler3 *DxcCompiler;     // compiles them
+
+    // Milestone 4: the triangle.  What its shaders expect (nothing yet), the
+    // whole pipeline set up for drawing it, and its three vertices.
+    ID3D12RootSignature *TriangleRootSignature;
+    ID3D12PipelineState *TrianglePipeline;
+    ID3D12Resource *TriangleVertexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW TriangleVertexBufferView;
 
     // Dear ImGui's context - all of its state.  Made by game_imgui.cpp on
     // the first frame after every load of game.dll, destroyed in GameUnload.
@@ -429,6 +449,309 @@ TransitionBarrier(ID3D12Resource *Resource, D3D12_RESOURCE_STATES Before,
     Result.Transition.StateBefore = Before;
     Result.Transition.StateAfter = After;
     return(Result);
+}
+
+// Loads dxcompiler.dll and makes the two DXC objects clash uses.  LoadLibrary
+// rather than linking: the DLL's reference count is then ours, so it stays
+// loaded across hot reloads of game.dll.
+internal b32
+LoadShaderCompiler(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
+{
+    Renderer->DxcModule = LoadLibraryA("dxcompiler.dll");
+    if(!Renderer->DxcModule)
+    {
+        RendererLog(Thread, Memory, "ERROR: dxcompiler.dll not found next to clash.exe.\n");
+        return(false);
+    }
+
+    // The one function the DLL exports.  Everything else comes from it.
+    DxcCreateInstanceProc CreateInstance =
+        (DxcCreateInstanceProc)(void *)GetProcAddress(Renderer->DxcModule, "DxcCreateInstance");
+    if(!CreateInstance)
+    {
+        RendererLog(Thread, Memory, "ERROR: dxcompiler.dll has no DxcCreateInstance.\n");
+        return(false);
+    }
+
+    if(DX12_FAILED(CreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&Renderer->DxcUtils))) ||
+       DX12_FAILED(CreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&Renderer->DxcCompiler))))
+    {
+        return(false);
+    }
+
+    return(true);
+}
+
+// Compiles one shader from an .hlsl file (Luna 6.7).  EntryPoint is the
+// function's name ("VS"); Target is the kind of shader and the shader model
+// ("vs_6_6").  Returns the compiled DXIL, which the caller must Release - or
+// 0, with the compiler's own messages in the log.
+internal IDxcBlob *
+CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
+              LPCWSTR FileName, LPCWSTR EntryPoint, LPCWSTR Target)
+{
+    IDxcBlob *Result = 0;
+
+    IDxcBlobEncoding *Source = 0;
+    if(DX12_FAILED(Renderer->DxcUtils->LoadFile(FileName, 0, &Source)))
+    {
+        return(0);
+    }
+
+    DxcBuffer SourceBuffer;
+    SourceBuffer.Ptr = Source->GetBufferPointer();
+    SourceBuffer.Size = Source->GetBufferSize();
+    SourceBuffer.Encoding = DXC_CP_ACP;     // let DXC work it out
+
+    // The same switches dxc.exe takes on its command line.  The file name
+    // first, so error messages can say which file they are about.
+    LPCWSTR Arguments[] =
+    {
+        FileName,
+        L"-E", EntryPoint,
+        L"-T", Target,
+#if CLASH_DEBUG
+        DXC_ARG_DEBUG,                  // -Zi: debug information, for PIX
+        DXC_ARG_SKIP_OPTIMIZATIONS,     // -Od: so PIX can step line by line
+        L"-Qembed_debug",               // keep that information inside the shader
+#endif
+    };
+
+    IDxcResult *Compiled = 0;
+    if(!DX12_FAILED(Renderer->DxcCompiler->Compile(&SourceBuffer, Arguments, (UINT32)ArrayCount(Arguments),
+                                                   0, IID_PPV_ARGS(&Compiled))))
+    {
+        // Errors and warnings, as text, exactly as dxc.exe prints them.
+        IDxcBlobUtf8 *Errors = 0;
+        Compiled->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&Errors), 0);
+        if(Errors && Errors->GetStringLength())
+        {
+            RendererLog(Thread, Memory, Errors->GetStringPointer());
+        }
+        ReleaseAndZero(Errors);
+
+        // Compile itself succeeds even when the SHADER does not - the status
+        // says which.
+        HRESULT Status = E_FAIL;
+        Compiled->GetStatus(&Status);
+        if(SUCCEEDED(Status))
+        {
+            Compiled->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&Result), 0);
+        }
+        else
+        {
+            char Line[512];
+            snprintf(Line, sizeof(Line), "ERROR: %ls (%ls, %ls) did not compile.\n",
+                     FileName, EntryPoint, Target);
+            RendererLog(Thread, Memory, Line);
+        }
+    }
+
+    ReleaseAndZero(Compiled);
+    ReleaseAndZero(Source);
+    return(Result);
+}
+
+internal b32
+CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
+{
+    // ------------------------------------------------------------------
+    // 1. The root signature (Luna 6.6.5): what the shaders expect to be
+    //    handed for each draw - like a function's parameter list.  The
+    //    triangle's shaders take nothing yet, so it is empty.  The flag says
+    //    vertices come in through an input layout.
+    // ------------------------------------------------------------------
+    D3D12_ROOT_SIGNATURE_DESC RootDesc = {};
+    RootDesc.NumParameters = 0;
+    RootDesc.pParameters = 0;
+    RootDesc.NumStaticSamplers = 0;
+    RootDesc.pStaticSamplers = 0;
+    RootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    // Serialized first - turned into the bytes the driver reads - then made
+    // into an object.  Mistakes in the description come back as text.
+    ID3DBlob *Serialized = 0;
+    ID3DBlob *SerializeErrors = 0;
+    HRESULT SerializeResult = D3D12SerializeRootSignature(&RootDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                                          &Serialized, &SerializeErrors);
+    if(SerializeErrors)
+    {
+        RendererLog(Thread, Memory, (char *)SerializeErrors->GetBufferPointer());
+        ReleaseAndZero(SerializeErrors);
+    }
+    if(DX12_FAILED(SerializeResult))
+    {
+        ReleaseAndZero(Serialized);
+        return(false);
+    }
+
+    b32 NoRootSignature =
+        DX12_FAILED(Renderer->Device->CreateRootSignature(0, Serialized->GetBufferPointer(),
+                                                          Serialized->GetBufferSize(),
+                                                          IID_PPV_ARGS(&Renderer->TriangleRootSignature)));
+    ReleaseAndZero(Serialized);
+    if(NoRootSignature)
+    {
+        return(false);
+    }
+
+    // ------------------------------------------------------------------
+    // 2. The shaders.  One file, two entry points.
+    // ------------------------------------------------------------------
+    IDxcBlob *VertexShader = CompileShader(Renderer, Thread, Memory,
+                                           L"data\\shaders\\triangle.hlsl", L"VS", L"vs_6_6");
+    IDxcBlob *PixelShader = CompileShader(Renderer, Thread, Memory,
+                                          L"data\\shaders\\triangle.hlsl", L"PS", L"ps_6_6");
+    if(!VertexShader || !PixelShader)
+    {
+        ReleaseAndZero(VertexShader);
+        ReleaseAndZero(PixelShader);
+        return(false);
+    }
+
+    // ------------------------------------------------------------------
+    // 3. The input layout (Luna 6.1): how to read a color_vertex.  Semantic
+    //    name, its index, format, input slot, byte offset into the struct,
+    //    and two instancing fields (per-vertex data, 0).
+    // ------------------------------------------------------------------
+    D3D12_INPUT_ELEMENT_DESC InputLayout[] =
+    {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, (UINT)offsetof(color_vertex, Position),
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, (UINT)offsetof(color_vertex, Color),
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+
+    // ------------------------------------------------------------------
+    // 4. The pipeline state object (Luna 6.8, 6.9): nearly everything about
+    //    how this draw runs, checked and compiled once, here.  Luna fills
+    //    the fixed-function parts from d3dx12.h's defaults; written out here
+    //    so every setting is in sight.
+    // ------------------------------------------------------------------
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC PipelineDesc = {};
+    PipelineDesc.pRootSignature = Renderer->TriangleRootSignature;
+    PipelineDesc.VS.pShaderBytecode = VertexShader->GetBufferPointer();
+    PipelineDesc.VS.BytecodeLength = VertexShader->GetBufferSize();
+    PipelineDesc.PS.pShaderBytecode = PixelShader->GetBufferPointer();
+    PipelineDesc.PS.BytecodeLength = PixelShader->GetBufferSize();
+
+    // Blending off: the pixel shader's colour replaces what is there.  The
+    // factors still have to be valid values, and all four channels written.
+    D3D12_RENDER_TARGET_BLEND_DESC *Blend = &PipelineDesc.BlendState.RenderTarget[0];
+    Blend->BlendEnable = FALSE;
+    Blend->LogicOpEnable = FALSE;
+    Blend->SrcBlend = D3D12_BLEND_ONE;
+    Blend->DestBlend = D3D12_BLEND_ZERO;
+    Blend->BlendOp = D3D12_BLEND_OP_ADD;
+    Blend->SrcBlendAlpha = D3D12_BLEND_ONE;
+    Blend->DestBlendAlpha = D3D12_BLEND_ZERO;
+    Blend->BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    Blend->LogicOp = D3D12_LOGIC_OP_NOOP;
+    Blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    PipelineDesc.SampleMask = 0xFFFFFFFF;     // every sample (there is one)
+
+    // Solid, back faces culled - clockwise is the front (Luna 5.10.2).  The
+    // fields not set stay 0: off.
+    PipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    PipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    PipelineDesc.RasterizerState.FrontCounterClockwise = FALSE;
+    PipelineDesc.RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+    PipelineDesc.RasterizerState.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+    PipelineDesc.RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+    PipelineDesc.RasterizerState.DepthClipEnable = TRUE;
+
+    // Depth test on: a pixel is drawn only if it is nearer than what is
+    // already there, and then it becomes the nearest.  Stencil off.
+    D3D12_DEPTH_STENCIL_DESC *DepthStencil = &PipelineDesc.DepthStencilState;
+    DepthStencil->DepthEnable = TRUE;
+    DepthStencil->DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    DepthStencil->DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    DepthStencil->StencilEnable = FALSE;
+    DepthStencil->StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+    DepthStencil->StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    D3D12_DEPTH_STENCILOP_DESC KeepAlways = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP,
+                                             D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+    DepthStencil->FrontFace = KeepAlways;
+    DepthStencil->BackFace = KeepAlways;
+
+    PipelineDesc.InputLayout.pInputElementDescs = InputLayout;
+    PipelineDesc.InputLayout.NumElements = (UINT)ArrayCount(InputLayout);
+    PipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+
+    // Must match what it draws into: the back buffer and the depth buffer.
+    PipelineDesc.NumRenderTargets = 1;
+    PipelineDesc.RTVFormats[0] = SWAP_CHAIN_FORMAT;
+    PipelineDesc.DSVFormat = DEPTH_FORMAT;
+    PipelineDesc.SampleDesc.Count = 1;
+    PipelineDesc.SampleDesc.Quality = 0;
+
+    b32 NoPipeline =
+        DX12_FAILED(Renderer->Device->CreateGraphicsPipelineState(&PipelineDesc,
+                                                                  IID_PPV_ARGS(&Renderer->TrianglePipeline)));
+
+    // The pipeline keeps its own copy of the compiled shaders.
+    ReleaseAndZero(VertexShader);
+    ReleaseAndZero(PixelShader);
+    if(NoPipeline)
+    {
+        return(false);
+    }
+
+    // ------------------------------------------------------------------
+    // 5. The vertices, in clip space: x and y -1..1 across the window, z
+    //    0..1 into it.  Top, then bottom right, then bottom left - CLOCKWISE
+    //    on screen, so it faces us and is not culled.
+    // ------------------------------------------------------------------
+    color_vertex Vertices[] =
+    {
+        {{ 0.0f,  0.5f, 0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},   // top: red
+        {{ 0.5f, -0.5f, 0.5f}, {0.0f, 1.0f, 0.0f, 1.0f}},   // bottom right: green
+        {{-0.5f, -0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},   // bottom left: blue
+    };
+
+    // An UPLOAD heap: memory the CPU can write and the GPU can read (Luna
+    // 4.1.14).  Fine for three vertices that never change; bigger meshes go
+    // in a DEFAULT heap with a copy, in milestone 5.
+    D3D12_HEAP_PROPERTIES UploadHeap = {};
+    UploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    // A buffer is a 1D run of bytes: Width is its size, the rest is fixed.
+    D3D12_RESOURCE_DESC BufferDesc = {};
+    BufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    BufferDesc.Width = sizeof(Vertices);
+    BufferDesc.Height = 1;
+    BufferDesc.DepthOrArraySize = 1;
+    BufferDesc.MipLevels = 1;
+    BufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+    BufferDesc.SampleDesc.Count = 1;
+    BufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    // GENERIC_READ: the state an upload-heap resource has to stay in.
+    if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE,
+                                                             &BufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                             0, IID_PPV_ARGS(&Renderer->TriangleVertexBuffer))))
+    {
+        return(false);
+    }
+
+    // Map: a CPU pointer to the buffer's memory.  The empty read range says
+    // the CPU will not read from it.  Copy the vertices in, then Unmap.
+    void *Mapped = 0;
+    D3D12_RANGE NoRead = {0, 0};
+    if(DX12_FAILED(Renderer->TriangleVertexBuffer->Map(0, &NoRead, &Mapped)))
+    {
+        return(false);
+    }
+    memcpy(Mapped, Vertices, sizeof(Vertices));
+    Renderer->TriangleVertexBuffer->Unmap(0, 0);
+
+    // The view (Luna 6.2): where the vertices are, how many bytes in all,
+    // and how many per vertex.  No descriptor heap needed.
+    Renderer->TriangleVertexBufferView.BufferLocation = Renderer->TriangleVertexBuffer->GetGPUVirtualAddress();
+    Renderer->TriangleVertexBufferView.SizeInBytes = (UINT)sizeof(Vertices);
+    Renderer->TriangleVertexBufferView.StrideInBytes = (UINT)sizeof(color_vertex);
+
+    return(true);
 }
 
 // Window is the HWND the swapchain draws into.  Returns false if DirectX 12
@@ -805,6 +1128,15 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     Renderer->ClearColor[2] = 0.71f;
     Renderer->ClearColor[3] = 1.0f;
 
+    if(!LoadShaderCompiler(Renderer, Thread, Memory))
+    {
+        RendererLog(Thread, Memory, "ERROR: No shader compiler - nothing will be drawn.\n");
+    }
+    else if(!CreateTriangle(Renderer, Thread, Memory))
+    {
+        RendererLog(Thread, Memory, "ERROR: No triangle - see the errors above.\n");
+    }
+
     return(true);
 }
 
@@ -925,7 +1257,15 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     D3D12_RECT Scissor = {0, 0, Renderer->Width, Renderer->Height};
     Renderer->CommandList->RSSetScissorRects(1, &Scissor);
 
-    // Nothing is drawn yet - milestone 4's triangle goes here.
+    //NOTE:(yigit): Drawing
+    if(Renderer->TrianglePipeline && Renderer->TriangleVertexBuffer)
+    {
+        Renderer->CommandList->SetGraphicsRootSignature(Renderer->TriangleRootSignature);
+        Renderer->CommandList->SetPipelineState(Renderer->TrianglePipeline);
+        Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        Renderer->CommandList->IASetVertexBuffers(0, 1, &Renderer->TriangleVertexBufferView);
+        Renderer->CommandList->DrawInstanced(3, 1, 0, 0);
+    }
 
     // Dear ImGui last, so it is on top of everything.  Its font texture is
     // in the shader-visible heap, which has to be bound for it to be read.
@@ -1035,6 +1375,16 @@ RendererShutdown(dx12_renderer *Renderer)
     // ImGui uses SrvHeap, so it must be stopped first - GameShutdown and
     // GameUnload see to that.
     Assert(!Renderer->ImGui);
+    ReleaseAndZero(Renderer->TriangleVertexBuffer);
+    ReleaseAndZero(Renderer->TrianglePipeline);
+    ReleaseAndZero(Renderer->TriangleRootSignature);
+    ReleaseAndZero(Renderer->DxcCompiler);
+    ReleaseAndZero(Renderer->DxcUtils);
+    if(Renderer->DxcModule)
+    {
+        FreeLibrary(Renderer->DxcModule);
+        Renderer->DxcModule = 0;
+    }
     ReleaseAndZero(Renderer->SrvHeap.Heap);
     ReleaseAndZero(Renderer->DepthBuffer);
     ReleaseAndZero(Renderer->DsvHeap.Heap);
