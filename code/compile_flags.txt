@@ -12,6 +12,7 @@
 -I.
 -Iexternal/D3D12AgilitySDK/include
 -Iexternal/imgui
+-Iexternal/dxc/inc
 -Wall
 -Wno-unused-parameter
 -Wno-unused-variable

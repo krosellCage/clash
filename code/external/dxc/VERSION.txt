@@ -1,0 +1,5 @@
+DirectX Shader Compiler (DXC) v1.9.2609 - "DX Compiler Release for September 2026"
+https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.9.2609
+
+Only what clash needs: the x64 compiler DLLs (copied next to clash.exe by
+build.bat), dxc.exe for compiling a shader by hand, and dxcapi.h.
