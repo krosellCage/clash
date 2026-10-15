@@ -24,7 +24,7 @@ enum camera_movement
 
 // NOTE(yigit): Angles are RADIANS throughout, not degrees, because Sin and
 // Cos take radians.  Conversions happen once, here.
-#define CAMERA_DEFAULT_YAW         (-0.5f*Pi32)             // -90 deg, looks down -Z
+#define CAMERA_DEFAULT_YAW         0.0f                     // looks down +Z
 #define CAMERA_DEFAULT_PITCH       0.0f
 #define CAMERA_DEFAULT_SPEED       2.5f                     // units per second
 #define CAMERA_DEFAULT_SENSITIVITY (0.04f*Pi32 / 180.0f)     // per pixel of mouse movement
@@ -57,18 +57,23 @@ struct camera
 internal void
 CameraUpdateVectors(camera *Camera)
 {
-    // Euler angles to a direction vector.  Cos(Pitch) scales the
-    // horizontal part: looking straight up leaves nothing pointing sideways.
-    Camera->Front = Normalize(Vec3(Cos(Camera->Yaw) * Cos(Camera->Pitch),
+    // Euler angles to a direction vector, left-handed: Yaw 0 looks down +Z,
+    // and a positive Yaw turns right, toward +X - the same as Mat4RotationY.
+    // Cos(Pitch) scales the horizontal part: looking straight up leaves
+    // nothing pointing sideways.
+    Camera->Front = Normalize(Vec3(Sin(Camera->Yaw) * Cos(Camera->Pitch),
                                    Sin(Camera->Pitch),
-                                   Sin(Camera->Yaw) * Cos(Camera->Pitch)));
+                                   Cos(Camera->Yaw) * Cos(Camera->Pitch)));
 
     // NOTE(yigit): Right and Up are derived from Front rather than stored, so
     // they can never drift out of agreement with it.  Up is re-derived from
     // Right and Front - it is NOT WorldUp, which is why the camera stays level
     // when you look up or down instead of rolling.
-    Camera->Right = Normalize(Cross(Camera->Front, Camera->WorldUp));
-    Camera->Up = Normalize(Cross(Camera->Right, Camera->Front));
+    //
+    // The order of each Cross is what makes it left-handed - the same as in
+    // Mat4LookAt: WorldUp x Front is right, Front x Right is up.
+    Camera->Right = Normalize(Cross(Camera->WorldUp, Camera->Front));
+    Camera->Up = Normalize(Cross(Camera->Front, Camera->Right));
 }
 
 internal void

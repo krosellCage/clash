@@ -81,7 +81,9 @@ LOG
          export before every hot reload and restarted after it. Depth
          buffer now D32_FLOAT_S8X24_UINT, stencil cleared each frame.
          DX12_FAILED macro logs file, line, call and Windows' reason.
-         VRAM budget/usage panel in the debug window.
+         VRAM budget/usage panel in the debug window. game_math
+         is LEFT-handed now, like Luna (checked against XM ...LH);
+         camera starts at z = -3 looking down +Z.
   Hours
   Next   Milestone 4 - a triangle: root signature, pipeline state,
          vertex buffer, shader (Luna chapter 6).

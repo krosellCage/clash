@@ -19,9 +19,10 @@
   game_math.h, DirectXMath and SimpleMath all share one convention - row
   vectors, row-major - so they mix freely:
 
-  1. RIGHT-HANDED.  Our camera looks down -Z.  Use the ...RH functions
-     (XMMatrixLookAtRH, XMMatrixPerspectiveFovRH), never Luna's ...LH ones.
-     (SimpleMath's Create... functions are already RH.)
+  1. LEFT-HANDED, like Luna.  Our camera looks down +Z.  Use the ...LH
+     functions (XMMatrixLookAtLH, XMMatrixPerspectiveFovLH), exactly as the
+     book does - never the ...RH ones.  BEWARE SimpleMath: its Create...
+     camera functions are right-handed - see below.
 
   2. THE SAME ORDER.  Vectors go on the left (v * M), and transforms read
      left to right in the order they happen:
@@ -55,9 +56,15 @@
     Matrix  W = Matrix::CreateScale(2.0f) * Matrix::CreateTranslation(P);
 
   Same rules as DirectXMath underneath: row vectors, so S * R * T reads
-  left to right.  And it is RIGHT-HANDED - Vector3::Forward is (0, 0, -1),
-  CreatePerspectiveFieldOfView and CreateLookAt are the RH versions - which
-  is our convention, not Luna's LH.
+  left to right.
+
+  IMPORTANT(yigit): But SimpleMath is RIGHT-HANDED, and we are not.  Its
+  Matrix::CreateLookAt, CreatePerspectiveFieldOfView and CreateOrthographic
+  are the RH versions, and its Vector3::Forward is (0, 0, -1) - which for us
+  points BACKWARD.  For cameras and projections use XMMatrixLookAtLH /
+  XMMatrixPerspectiveFovLH, or Mat4LookAt / Mat4Perspective.  Scale,
+  rotation, translation and everything else in SimpleMath are the same in
+  both, and fine to use.
 
   IMPORTANT(yigit): It includes dxgi1_2.h (for its Viewport type), and with
   it windows.h - so these two must be defined before it, or windows.h's

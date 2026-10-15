@@ -1,9 +1,14 @@
 #ifndef GAME_MATH_H
 #define GAME_MATH_H
 /*
-  NOTE(yigit): Vectors and matrices.  Right-handed (the camera looks down
-  -Z), ROW vectors, matrices stored ROW-major - the same convention as Frank
-  Luna's book and DirectXMath, so his maths can be followed as written.
+  NOTE(yigit): Vectors and matrices.  LEFT-handed - X right, Y up, Z forward
+  into the screen, so the camera looks down +Z - with ROW vectors and
+  matrices stored ROW-major.  Exactly the convention of Frank Luna's book and
+  DirectXMath's ...LH functions, so his maths can be followed as written.
+
+    - Left-handed: point the left hand's fingers along +X, curl them toward
+      +Y, and the thumb is +Z.  Cross(X, Y) = Z, as always - it is only the
+      picture that is mirrored compared with a right-handed system.
 
     - A vector is a row, and goes on the LEFT:  v * M.
     - Transforms read left to right, in the order they happen:
@@ -71,20 +76,21 @@ Mat4Mul(mat4 A, mat4 B)
 inline mat4 operator*(mat4 A, mat4 B) { return(Mat4Mul(A, B)); }
 
 /*
-  Perspective projection, for DirectX: depth comes out 0 at Near and 1 at Far.
+  Perspective projection, for DirectX: depth comes out 0 at Near and 1 at Far
+  (Luna 5.6.3.5).  F is 1/tan(FovY/2).
 
-    [ F/Aspect  0   0                  0 ]
-    [ 0         F   0                  0 ]
-    [ 0         0   Far/(Near-Far)    -1 ]
-    [ 0         0   Near*Far/(Near-Far) 0 ]
+    [ F/Aspect  0   0                    0 ]
+    [ 0         F   0                    0 ]
+    [ 0         0   Far/(Far-Near)       1 ]
+    [ 0         0  -Near*Far/(Far-Near)  0 ]
 
-  The -1 at row 2, column 3 copies the eye-space -Z into W, and the GPU's
-  divide by W is what makes distant things smaller.
+  The 1 at row 2, column 3 copies the view-space Z - the distance in front of
+  the camera - into W, and the GPU's divide by W is what makes distant things
+  smaller.  The two depth entries then map Z = Near to 0 and Z = Far to 1.
 
-  NOTE(yigit): Only the two depth entries differ from OpenGL's version,
-  which mapped Near..Far to -1..1.  Used unchanged, that would put everything
-  in the front half of the view outside DirectX's 0..1 range, and it would
-  silently vanish.  Same as XMMatrixPerspectiveFovRH.
+  NOTE(yigit): OpenGL's version maps Near..Far to -1..1.  Used unchanged, it
+  would put everything in the front half of the view outside DirectX's 0..1
+  range, and it would silently vanish.  Same as XMMatrixPerspectiveFovLH.
 */
 inline mat4
 Mat4Perspective(r32 FovYRadians, r32 Aspect, r32 Near, r32 Far)
@@ -93,8 +99,8 @@ Mat4Perspective(r32 FovYRadians, r32 Aspect, r32 Near, r32 Far)
     r32 F = 1.0f / tanf(FovYRadians * 0.5f);
     M.E[0]  =  F / Aspect;
     M.E[5]  =  F;
-    M.E[10] = Far / (Near - Far);           M.E[11] = -1.0f;
-    M.E[14] = (Near * Far) / (Near - Far);
+    M.E[10] = Far / (Far - Near);           M.E[11] = 1.0f;
+    M.E[14] = -(Near * Far) / (Far - Near);
     return(M);
 }
 
@@ -104,8 +110,8 @@ Mat4Perspective(r32 FovYRadians, r32 Aspect, r32 Near, r32 Far)
   to sit flat on the screen.
 
   NOTE(yigit): The difference from Mat4Perspective is the entry that is NOT
-  set here.  Perspective puts -1 in E[11] (row 2, column 3), which lands the
-  eye-space Z in the clip-space W, and the divide by W is what makes distant
+  set here.  Perspective puts 1 in E[11] (row 2, column 3), which lands the
+  view-space Z in the clip-space W, and the divide by W is what makes distant
   things smaller.  Ortho leaves E[11] at 0 and E[15] at 1, so W is always 1
   and no divide happens at all.
 
@@ -130,10 +136,10 @@ Mat4Ortho(r32 Left, r32 Right, r32 Bottom, r32 Top,
     M.E[0]  =  2.0f / (Right - Left);
     M.E[5]  =  2.0f / (Top - Bottom);
 
-    // Negated because the camera looks down -Z while Near and Far are given
-    // as positive distances in front of it.  1 over the depth range rather
-    // than OpenGL's 2: DirectX's depth only spans 0..1.
-    M.E[10] = -1.0f / (Far - Near);
+    // Positive: the camera looks down +Z, and Near and Far are distances in
+    // front of it.  1 over the depth range rather than OpenGL's 2: DirectX's
+    // depth only spans 0..1.  Same as XMMatrixOrthographicOffCenterLH.
+    M.E[10] = 1.0f / (Far - Near);
 
     M.E[12] = -(Right + Left) / (Right - Left);
     M.E[13] = -(Top + Bottom) / (Top - Bottom);
@@ -171,10 +177,13 @@ Mat4Scale(r32 X, r32 Y, r32 Z)
     return(M);
 }
 
-// Rotations about one axis, counterclockwise looking down that axis toward
-// the origin.  Each row is where that axis ends up - which is why the axis
-// being rotated around keeps its own row untouched.  Same as
-// XMMatrixRotationX/Y/Z.
+// Rotations about one axis.  A positive angle turns CLOCKWISE when you look
+// from the positive end of the axis toward the origin - left-handed.  (The
+// numbers are the same in a right-handed system; only that picture is
+// mirrored.)  So Mat4RotationY with a positive angle turns +Z toward +X:
+// forward toward right, a turn to the right seen from above.  Each row is
+// where that axis ends up - which is why the axis being rotated around keeps
+// its own row untouched.  Same as XMMatrixRotationX/Y/Z.
 inline mat4
 Mat4RotationX(r32 Angle)
 {
@@ -375,26 +384,27 @@ Cross(vec3 A, vec3 B)
 }
 
 // -------------------------------------------------------------------------
-// View matrix from a camera position, a point to look at, and which way is up.
-// The equivalent of glm::lookAt.
+// View matrix from a camera position, a point to look at, and which way is up
+// (Luna 5.6.2) - his u, v, w are R, U, F here.
 //
-// The camera's own world transform would have its axes (right, up, backward)
-// as its ROWS and Eye as its bottom row - that is what placing the camera in
-// the world means.  The view matrix is the INVERSE of that: it moves the
-// whole world in front of a fixed eye at the origin.  Inverting a rotation
-// is just transposing it, so the camera's axes become the COLUMNS here; and
-// undoing the move turns Eye into -Eye dotted with each axis, in the bottom
-// row.
+// The camera's own world transform has its axes (right, up, forward) as its
+// ROWS and Eye as its bottom row - that is what placing the camera in the
+// world means.  The view matrix is the INVERSE of that: it moves the whole
+// world in front of a fixed eye at the origin.  Inverting a rotation is just
+// transposing it, so the camera's axes become the COLUMNS here; and undoing
+// the move turns Eye into -Eye dotted with each axis, in the bottom row.
+// Together: a point's view-space X is (P - Eye) dotted with R - how far to
+// the camera's right - and likewise Y with U and Z with F.
 //
-// NOTE(yigit): F points BACKWARD, from the target toward the eye, because
-// this right-handed camera looks down -Z.  This is why Eye - Target rather than the
-// other way round, and it is the sign that catches everybody.
-// Same as XMMatrixLookAtRH.
+// NOTE(yigit): F points FORWARD, from the eye toward the target, because this
+// left-handed camera looks down +Z - so Target - Eye.  And Right is
+// Cross(Up, F), in that order: (0,1,0) x (0,0,1) = (1,0,0).
+// Same as XMMatrixLookAtLH.
 // -------------------------------------------------------------------------
 inline mat4
 Mat4LookAt(vec3 Eye, vec3 Target, vec3 Up)
 {
-    vec3 F = Normalize(Eye - Target);       // backward
+    vec3 F = Normalize(Target - Eye);       // forward
     vec3 R = Normalize(Cross(Up, F));       // right
     vec3 U = Cross(F, R);                   // true up, already unit length
 
@@ -449,11 +459,12 @@ Normalize(vec4 A)
 
 // NOTE(yigit): Standard FPS camera basis vectors, derived from Yaw only
 // (so movement stays on the ground plane even while looking up/down).
-// Yaw = 0 looks down -Z, consistent with Mat4RotationY below.
+// Yaw = 0 looks down +Z, and a positive Yaw turns right - the same as
+// Mat4RotationY(Yaw) applied to +Z and +X.
 inline vec3
 CameraForward(r32 Yaw)
 {
-    return Vec3(-sinf(Yaw), 0.0f, -cosf(Yaw));
+    return Vec3(sinf(Yaw), 0.0f, cosf(Yaw));
 }
 
 inline vec3

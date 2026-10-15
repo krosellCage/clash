@@ -82,7 +82,8 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
         // NOTE(yigit): The storage starts zeroed, so every camera field would
         // be 0 - and a zero-length Front makes the view matrix degenerate.
-        CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, 3.0f));
+        // 3 units back from the origin, looking at it - down +Z.
+        CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, -3.0f));
 
         // Music is optional.  Asked about first, so a project without a
         // music file does not log an error on every start.
