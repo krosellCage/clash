@@ -38,6 +38,9 @@ set CompilerFlags=-MTd -nologo -Gm- -GR- -EHa- -Od -Oi -WX -W4 -wd4100 -wd4189 -
 if not exist build mkdir build
 pushd build
 
+REM How long each part takes to build, printed after it.  See :Centiseconds.
+call :Centiseconds BuildStart
+
 REM NOTE(yigit): The DLL's debug info gets a new, random name every build.
 REM While clash.exe runs, the debugger holds the old .pdb open, and a build
 REM that tried to overwrite it would fail.  The del clears out the old ones
@@ -70,15 +73,20 @@ REM never touches DirectX.  -I puts the Agility SDK's d3d12.h ahead of the
 REM Windows SDK's older one, so the headers match the runtime we ship.  The
 REM second -I is Dear ImGui's folder: its backend says #include "imgui.h".
 REM The third is DXC's, for dxcapi.h.
+call :Centiseconds GameStart
 cl %CompilerFlags% -I..\code\external\D3D12AgilitySDK\include -I..\code\external\imgui -I..\code\external\dxc\inc ..\code\game.cpp -Fegame.dll -Fmgame.map -LD /link -incremental:no -opt:ref -PDB:game_%random%.pdb -EXPORT:GameUpdateAndRender -EXPORT:GameGetSoundSamples -EXPORT:GameShutdown -EXPORT:GameUnload d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
 set GameResult=%ERRORLEVEL%
+call :PrintElapsed "game.dll " GameStart
 
 del lock.tmp
 
 REM The platform.  ole32 is COM - CoCreateInstance and friends - which WASAPI,
 REM the sound API, is built on.
+call :Centiseconds PlatformStart
 cl %CompilerFlags% ..\code\win32_clash.cpp -Feclash.exe -Fmclash.map /link -incremental:no -opt:ref -subsystem:windows user32.lib gdi32.lib ole32.lib
 set PlatformResult=%ERRORLEVEL%
+call :PrintElapsed "clash.exe" PlatformStart
+call :PrintElapsed "total    " BuildStart
 
 popd
 popd
@@ -93,4 +101,30 @@ if %PlatformResult% neq 0 (
     echo PLATFORM BUILD FAILED  -  is clash.exe still running?
     exit /b %PlatformResult%
 )
+exit /b 0
+
+REM ---------------------------------------------------------------------------
+REM call :Centiseconds Name - sets the variable Name to the time of day in
+REM hundredths of a second.  %TIME% is " 2:39:14.86" here, "02:39:14,86" in
+REM some locales: the leading space becomes a 0, and ":", "." and "," all
+REM split it.  "1%%a - 100" reads "08" as 8 - plain "08" would be octal, and
+REM invalid.
+:Centiseconds
+set "Now=%TIME: =0%"
+for /f "tokens=1-4 delims=:.," %%a in ("%Now%") do (
+    set /a "%1=(((1%%a-100)*60 + (1%%b-100))*60 + (1%%c-100))*100 + (1%%d-100)"
+)
+exit /b 0
+
+REM call :PrintElapsed "label" StartName - prints the label and the seconds
+REM since StartName was set by :Centiseconds, e.g. "game.dll   2.47s".  A build
+REM across midnight would go negative, so a day is added back.
+:PrintElapsed
+call :Centiseconds ElapsedEnd
+set /a Elapsed=ElapsedEnd - %2
+if %Elapsed% lss 0 set /a Elapsed+=8640000
+set /a ElapsedSeconds=Elapsed / 100
+set /a ElapsedHundredths=Elapsed %% 100
+set "ElapsedHundredths=0%ElapsedHundredths%"
+echo %~1  %ElapsedSeconds%.%ElapsedHundredths:~-2%s
 exit /b 0
