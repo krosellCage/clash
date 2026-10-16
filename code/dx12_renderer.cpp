@@ -136,6 +136,44 @@ struct descriptor_heap
     u32 Count;
 };
 
+/*
+  Geometry (Luna 6.10's MeshGeometry and SubmeshGeometry, C-style).
+
+  A mesh is one vertex buffer and one index buffer.  Several objects can be
+  packed into the pair - Luna's Figure 6.3 - and each is a submesh: which
+  run of the index buffer it uses, and where its vertices start.  Each
+  object's indices count from 0; BaseVertex is added to every one of them
+  by the GPU, so the box's index 0 can mean vertex 8 of the shared buffer.
+
+  The three numbers are exactly DrawIndexedInstanced's: set the buffers
+  once, then draw each submesh with its own IndexCount / StartIndex /
+  BaseVertex.
+
+  Luna's version also keeps a name, CPU copies of the vertices (for picking
+  and collision) and a bounding box.  We look submeshes up by index instead
+  of by name, and collision is game code - the server has no GPU - so the
+  CPU copies stay out.  Bounds come with culling.
+*/
+struct submesh
+{
+    u32 IndexCount;
+    u32 StartIndex;     // Luna's StartIndexLocation: first index, in indices
+    i32 BaseVertex;     // Luna's BaseVertexLocation: added to every index
+};
+
+#define MESH_MAX_SUBMESHES 16
+
+struct mesh
+{
+    ID3D12Resource *VertexBuffer;       // both in a DEFAULT heap - VRAM
+    ID3D12Resource *IndexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW VertexView;    // made once: the buffers never move
+    D3D12_INDEX_BUFFER_VIEW IndexView;
+
+    u32 SubmeshCount;
+    submesh Submeshes[MESH_MAX_SUBMESHES];
+};
+
 // Everything the renderer keeps from one frame to the next.  Add your
 // ID3D12Device *, swapchain, command queue and so on here.
 struct dx12_renderer
@@ -214,11 +252,7 @@ struct dx12_renderer
     // write the matrices every frame.
     ID3D12RootSignature *CubeRootSignature;
     ID3D12PipelineState *CubePipeline;
-    ID3D12Resource *CubeVertexBuffer;
-    ID3D12Resource *CubeIndexBuffer;
-    D3D12_VERTEX_BUFFER_VIEW CubeVertexBufferView;
-    D3D12_INDEX_BUFFER_VIEW CubeIndexBufferView;
-    u32 CubeIndexCount;
+    mesh CubeMesh;
 
     ID3D12Resource *ConstantBuffer;
     u8 *ConstantBufferMapped;       // the CPU's pointer into it
@@ -843,21 +877,28 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
         4, 0, 3,   4, 3, 7,     // bottom (y = -1)
     };
 
-    if(!CreateStaticBuffer(Renderer, Thread, Memory, Vertices, sizeof(Vertices), &Renderer->CubeVertexBuffer) ||
-       !CreateStaticBuffer(Renderer, Thread, Memory, Indices, sizeof(Indices), &Renderer->CubeIndexBuffer))
+    mesh *Mesh = &Renderer->CubeMesh;
+    if(!CreateStaticBuffer(Renderer, Thread, Memory, Vertices, sizeof(Vertices), &Mesh->VertexBuffer) ||
+       !CreateStaticBuffer(Renderer, Thread, Memory, Indices, sizeof(Indices), &Mesh->IndexBuffer))
     {
         return(false);
     }
 
-    Renderer->CubeVertexBufferView.BufferLocation = Renderer->CubeVertexBuffer->GetGPUVirtualAddress();
-    Renderer->CubeVertexBufferView.SizeInBytes = (UINT)sizeof(Vertices);
-    Renderer->CubeVertexBufferView.StrideInBytes = (UINT)sizeof(color_vertex);
+    Mesh->VertexView.BufferLocation = Mesh->VertexBuffer->GetGPUVirtualAddress();
+    Mesh->VertexView.SizeInBytes = (UINT)sizeof(Vertices);
+    Mesh->VertexView.StrideInBytes = (UINT)sizeof(color_vertex);
 
     // The index buffer's view: where, how many bytes, and how big each index is.
-    Renderer->CubeIndexBufferView.BufferLocation = Renderer->CubeIndexBuffer->GetGPUVirtualAddress();
-    Renderer->CubeIndexBufferView.SizeInBytes = (UINT)sizeof(Indices);
-    Renderer->CubeIndexBufferView.Format = DXGI_FORMAT_R16_UINT;
-    Renderer->CubeIndexCount = (u32)ArrayCount(Indices);
+    Mesh->IndexView.BufferLocation = Mesh->IndexBuffer->GetGPUVirtualAddress();
+    Mesh->IndexView.SizeInBytes = (UINT)sizeof(Indices);
+    Mesh->IndexView.Format = DXGI_FORMAT_R16_UINT;
+
+    // One submesh: the whole buffer pair.  A second shape packed in after
+    // it would start at index 36 and vertex 8.
+    Mesh->SubmeshCount = 1;
+    Mesh->Submeshes[0].IndexCount = (u32)ArrayCount(Indices);
+    Mesh->Submeshes[0].StartIndex = 0;
+    Mesh->Submeshes[0].BaseVertex = 0;
 
     // ------------------------------------------------------------------
     // 7. NEW: the constant buffer (Luna 6.6.1) - two 256-byte slots, slot
@@ -1420,12 +1461,19 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         Renderer->CommandList->SetGraphicsRootConstantBufferView(1, Constants + 1*CONSTANT_BUFFER_SLOT_SIZE);
 
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        Renderer->CommandList->IASetVertexBuffers(0, 1, &Renderer->CubeVertexBufferView);
-        Renderer->CommandList->IASetIndexBuffer(&Renderer->CubeIndexBufferView);
+        mesh *Mesh = &Renderer->CubeMesh;
+        Renderer->CommandList->IASetVertexBuffers(0, 1, &Mesh->VertexView);
+        Renderer->CommandList->IASetIndexBuffer(&Mesh->IndexView);
 
-        // 36 indices, 1 instance, starting at index 0, adding 0 to each
-        // index, instance 0 (Luna 6.3).
-        Renderer->CommandList->DrawIndexedInstanced(Renderer->CubeIndexCount, 1, 0, 0, 0);
+        // The buffers are set once; each submesh is then just three numbers:
+        // how many indices, the first one, and what to add to each (Luna
+        // 6.3).  1 instance, starting at instance 0.
+        for(u32 SubmeshIndex = 0; SubmeshIndex < Mesh->SubmeshCount; ++SubmeshIndex)
+        {
+            submesh *Submesh = &Mesh->Submeshes[SubmeshIndex];
+            Renderer->CommandList->DrawIndexedInstanced(Submesh->IndexCount, 1, Submesh->StartIndex,
+                                                        Submesh->BaseVertex, 0);
+        }
     }
 
     // Dear ImGui last, so it is on top of everything.  Its font texture is
@@ -1542,8 +1590,8 @@ RendererShutdown(dx12_renderer *Renderer)
         Renderer->ConstantBufferMapped = 0;
     }
     ReleaseAndZero(Renderer->ConstantBuffer);
-    ReleaseAndZero(Renderer->CubeIndexBuffer);
-    ReleaseAndZero(Renderer->CubeVertexBuffer);
+    ReleaseAndZero(Renderer->CubeMesh.IndexBuffer);
+    ReleaseAndZero(Renderer->CubeMesh.VertexBuffer);
     ReleaseAndZero(Renderer->CubePipeline);
     ReleaseAndZero(Renderer->CubeRootSignature);
     ReleaseAndZero(Renderer->DxcCompiler);
