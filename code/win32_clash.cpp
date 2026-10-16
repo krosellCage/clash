@@ -201,6 +201,15 @@ Win32SetWorkingDirectoryToProjectRoot(win32_state *State)
         }
     }
 
+    // "T:\build\clash.exe" (a subst drive) leaves just "T:", which Windows
+    // reads as "the current folder on drive T", not its root - so put the
+    // backslash back: "T:\".
+    if((Path[0] != 0) && (Path[1] == ':') && (Path[2] == 0))
+    {
+        Path[2] = '\\';
+        Path[3] = 0;
+    }
+
     SetCurrentDirectoryA(Path);
 }
 
