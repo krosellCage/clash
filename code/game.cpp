@@ -82,8 +82,10 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
         // NOTE(yigit): The storage starts zeroed, so every camera field would
         // be 0 - and a zero-length Front makes the view matrix degenerate.
-        // 3 units back from the origin, looking at it - down +Z.
-        CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, -3.0f));
+        // 5 units back from the origin, looking at it - down +Z.  Far
+        // enough that the whole spinning cube fits: its corners reach 1.73
+        // from its centre.
+        CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, -5.0f));
 
         // Music is optional.  Asked about first, so a project without a
         // music file does not log an error on every start.
@@ -199,7 +201,31 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         ImGui::Render();
     }
 
-    RendererRender(Renderer, Thread, Memory, Input);
+    // Milestone 5: the cube, with DirectXMath - Luna's maths, as in his Box
+    // demo.  XMMATRIX is for DOING maths (SSE registers, locals only);
+    // XMFLOAT4X4 is for storing a result and passing it on.
+    //
+    // The cube spins - about Y, and half as fast about X so every face comes
+    // round.  World * View * Projection, read left to right: place the cube,
+    // then look at it, then project it.
+    r32 Time = (r32)State->TimeSeconds;
+    XMMATRIX World = XMMatrixRotationY(Time) * XMMatrixRotationX(0.5f*Time);
+
+    // The camera's view, from its position, a point one unit ahead, and its
+    // up.  XMLoadVec3 (game_directx_math.h) turns our vec3s into XMVECTORs:
+    // W = 1 for the two points, 0 for the up direction.
+    camera *Camera = &State->Camera;
+    XMMATRIX View = XMMatrixLookAtLH(XMLoadVec3(Camera->Position, 1.0f),
+                                     XMLoadVec3(Camera->Position + Camera->Front, 1.0f),
+                                     XMLoadVec3(Camera->Up, 0.0f));
+    XMMATRIX Projection = XMMatrixPerspectiveFovLH(Camera->Zoom, Aspect, 0.1f, 500.0f);
+
+    XMFLOAT4X4 CubeWorld;
+    XMFLOAT4X4 ViewProj;
+    XMStoreFloat4x4(&CubeWorld, World);
+    XMStoreFloat4x4(&ViewProj, View * Projection);
+
+    RendererRender(Renderer, Thread, Memory, Input, &CubeWorld, &ViewProj);
 }
 
 extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)

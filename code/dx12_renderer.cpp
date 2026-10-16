@@ -103,12 +103,29 @@
   RTVs and DSVs are only ever handed to commands, by their CPU handle, so
   their heaps have no GPU handles at all.
 */
+#define CONSTANT_BUFFER_SLOT_SIZE D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT
 
 struct color_vertex
 {
     XMFLOAT3 Position;
     XMFLOAT4 Color;
 };
+
+// What cube.hlsl's two cbuffers hold - the same bytes, in the same order
+// (Luna 6.6).  XMFLOAT4X4: DirectXMath's STORAGE type for a matrix, 16
+// floats.  They hold the matrices TRANSPOSED - see RendererRender.
+struct object_constants
+{
+    XMFLOAT4X4 World;
+};
+
+struct pass_constants
+{
+    XMFLOAT4X4 ViewProj;
+};
+
+static_assert(sizeof(object_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "object_constants outgrew its slot");
+static_assert(sizeof(pass_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "pass_constants outgrew its slot");
 
 struct descriptor_heap
 {
@@ -192,12 +209,19 @@ struct dx12_renderer
     IDxcUtils *DxcUtils;            // loads files
     IDxcCompiler3 *DxcCompiler;     // compiles them
 
-    // Milestone 4: the triangle.  What its shaders expect (nothing yet), the
-    // whole pipeline set up for drawing it, and its three vertices.
-    ID3D12RootSignature *TriangleRootSignature;
-    ID3D12PipelineState *TrianglePipeline;
-    ID3D12Resource *TriangleVertexBuffer;
-    D3D12_VERTEX_BUFFER_VIEW TriangleVertexBufferView;
+    // Milestone 5: the cube.  Its vertices and indices live in VRAM; the
+    // constant buffer in an upload heap, mapped for good so the CPU can
+    // write the matrices every frame.
+    ID3D12RootSignature *CubeRootSignature;
+    ID3D12PipelineState *CubePipeline;
+    ID3D12Resource *CubeVertexBuffer;
+    ID3D12Resource *CubeIndexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW CubeVertexBufferView;
+    D3D12_INDEX_BUFFER_VIEW CubeIndexBufferView;
+    u32 CubeIndexCount;
+
+    ID3D12Resource *ConstantBuffer;
+    u8 *ConstantBufferMapped;       // the CPU's pointer into it
 
     // Dear ImGui's context - all of its state.  Made by game_imgui.cpp on
     // the first frame after every load of game.dll, destroyed in GameUnload.
@@ -552,24 +576,126 @@ CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memo
     return(Result);
 }
 
+// The description of a heap of this type - all its other fields stay 0.
+inline D3D12_HEAP_PROPERTIES
+DescribeHeap(D3D12_HEAP_TYPE Type)
+{
+    D3D12_HEAP_PROPERTIES Result = {};
+    Result.Type = Type;
+    return(Result);
+}
+
+// The description of a buffer of Size bytes.  Every buffer's is the same but
+// for the size (Luna 6.2's CD3DX12_RESOURCE_DESC::Buffer).
+inline D3D12_RESOURCE_DESC
+DescribeBuffer(u64 Size)
+{
+    D3D12_RESOURCE_DESC Result = {};
+    Result.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    Result.Width = Size;
+    Result.Height = 1;
+    Result.DepthOrArraySize = 1;
+    Result.MipLevels = 1;
+    Result.Format = DXGI_FORMAT_UNKNOWN;
+    Result.SampleDesc.Count = 1;
+    Result.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return(Result);
+}
+
+/*
+  A buffer in a DEFAULT heap - VRAM, the fastest memory for the GPU to read -
+  with Data copied into it (Luna 6.2's CreateStaticBuffer).  The CPU cannot
+  write to VRAM, so: put the data in a temporary UPLOAD buffer, have the GPU
+  copy it across, wait for the copy, and throw the upload buffer away.
+  Startup only - it waits for the GPU.
+
+  No barriers, unlike Luna's version: a BUFFER starts in COMMON and moves on
+  its own - to COPY_DEST for the copy, to vertex or index buffer when it is
+  drawn - and drops back to COMMON after each ExecuteCommandLists.  Textures
+  will not be so easy (milestone 6).
+*/
 internal b32
-CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
+CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
+                   const void *Data, u64 Size, ID3D12Resource **Result)
+{
+    D3D12_RESOURCE_DESC Desc = DescribeBuffer(Size);
+
+    // 1. The buffer itself, in VRAM.
+    D3D12_HEAP_PROPERTIES DefaultHeap = DescribeHeap(D3D12_HEAP_TYPE_DEFAULT);
+    if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&DefaultHeap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                                             D3D12_RESOURCE_STATE_COMMON, 0,
+                                                             IID_PPV_ARGS(Result))))
+    {
+        return(false);
+    }
+
+    // 2. A temporary buffer the CPU can write, with the data put in it.
+    ID3D12Resource *Upload = 0;
+    D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
+    if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                                             D3D12_RESOURCE_STATE_GENERIC_READ, 0,
+                                                             IID_PPV_ARGS(&Upload))))
+    {
+        return(false);
+    }
+
+    void *Mapped = 0;
+    D3D12_RANGE NoRead = {0, 0};
+    if(DX12_FAILED(Upload->Map(0, &NoRead, &Mapped)))
+    {
+        Upload->Release();
+        return(false);
+    }
+    memcpy(Mapped, Data, Size);
+    Upload->Unmap(0, 0);
+
+    // 3. The GPU copies it across.  The command list is closed between
+    //    frames, so: open it, record the copy, close it, run it, wait.
+    b32 Copied = false;
+    if(!DX12_FAILED(Renderer->CommandAllocator->Reset()) &&
+       !DX12_FAILED(Renderer->CommandList->Reset(Renderer->CommandAllocator, 0)))
+    {
+        Renderer->CommandList->CopyBufferRegion(*Result, 0, Upload, 0, Size);
+        if(!DX12_FAILED(Renderer->CommandList->Close()))
+        {
+            ID3D12CommandList *Lists[] = {Renderer->CommandList};
+            Renderer->Queue->ExecuteCommandLists(1, Lists);
+            FlushCommandQueue(Renderer);
+            Copied = true;
+        }
+    }
+
+    // The copy is finished, so the upload buffer can go.
+    Upload->Release();
+    return(Copied);
+}
+
+internal b32
+CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
 {
     // ------------------------------------------------------------------
-    // 1. The root signature (Luna 6.6.5): what the shaders expect to be
-    //    handed for each draw - like a function's parameter list.  The
-    //    triangle's shaders take nothing yet, so it is empty.  The flag says
-    //    vertices come in through an input layout.
+    // 1. The root signature - NEW: two parameters, the shaders' b0 and b1.
+    //    Each is a "root CBV": just the GPU address of the constant data,
+    //    with no descriptor and no heap in between.  (Luna uses descriptor
+    //    tables here, and root CBVs from 7.4.3.)
     // ------------------------------------------------------------------
+    D3D12_ROOT_PARAMETER Parameters[2] = {};
+    Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    Parameters[0].Descriptor.ShaderRegister = 0;        // b0: ObjectConstants
+    Parameters[0].Descriptor.RegisterSpace = 0;
+    Parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    Parameters[1].Descriptor.ShaderRegister = 1;        // b1: PassConstants
+    Parameters[1].Descriptor.RegisterSpace = 0;
+    Parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
     D3D12_ROOT_SIGNATURE_DESC RootDesc = {};
-    RootDesc.NumParameters = 0;
-    RootDesc.pParameters = 0;
+    RootDesc.NumParameters = (UINT)ArrayCount(Parameters);
+    RootDesc.pParameters = Parameters;
     RootDesc.NumStaticSamplers = 0;
     RootDesc.pStaticSamplers = 0;
     RootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
-    // Serialized first - turned into the bytes the driver reads - then made
-    // into an object.  Mistakes in the description come back as text.
     ID3DBlob *Serialized = 0;
     ID3DBlob *SerializeErrors = 0;
     HRESULT SerializeResult = D3D12SerializeRootSignature(&RootDesc, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -588,7 +714,7 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     b32 NoRootSignature =
         DX12_FAILED(Renderer->Device->CreateRootSignature(0, Serialized->GetBufferPointer(),
                                                           Serialized->GetBufferSize(),
-                                                          IID_PPV_ARGS(&Renderer->TriangleRootSignature)));
+                                                          IID_PPV_ARGS(&Renderer->CubeRootSignature)));
     ReleaseAndZero(Serialized);
     if(NoRootSignature)
     {
@@ -596,12 +722,12 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     }
 
     // ------------------------------------------------------------------
-    // 2. The shaders.  One file, two entry points.
+    // 2. The shaders - cube.hlsl now.
     // ------------------------------------------------------------------
     IDxcBlob *VertexShader = CompileShader(Renderer, Thread, Memory,
-                                           L"data\\shaders\\triangle.hlsl", L"VS", L"vs_6_6");
+                                           L"data\\shaders\\cube.hlsl", L"VS", L"vs_6_6");
     IDxcBlob *PixelShader = CompileShader(Renderer, Thread, Memory,
-                                          L"data\\shaders\\triangle.hlsl", L"PS", L"ps_6_6");
+                                          L"data\\shaders\\cube.hlsl", L"PS", L"ps_6_6");
     if(!VertexShader || !PixelShader)
     {
         ReleaseAndZero(VertexShader);
@@ -610,9 +736,7 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     }
 
     // ------------------------------------------------------------------
-    // 3. The input layout (Luna 6.1): how to read a color_vertex.  Semantic
-    //    name, its index, format, input slot, byte offset into the struct,
-    //    and two instancing fields (per-vertex data, 0).
+    // 3. The input layout - the same color_vertex as the triangle.
     // ------------------------------------------------------------------
     D3D12_INPUT_ELEMENT_DESC InputLayout[] =
     {
@@ -623,20 +747,16 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     };
 
     // ------------------------------------------------------------------
-    // 4. The pipeline state object (Luna 6.8, 6.9): nearly everything about
-    //    how this draw runs, checked and compiled once, here.  Luna fills
-    //    the fixed-function parts from d3dx12.h's defaults; written out here
-    //    so every setting is in sight.
+    // 4. The pipeline state object - exactly the triangle's settings, with
+    //    the cube's root signature.
     // ------------------------------------------------------------------
     D3D12_GRAPHICS_PIPELINE_STATE_DESC PipelineDesc = {};
-    PipelineDesc.pRootSignature = Renderer->TriangleRootSignature;
+    PipelineDesc.pRootSignature = Renderer->CubeRootSignature;
     PipelineDesc.VS.pShaderBytecode = VertexShader->GetBufferPointer();
     PipelineDesc.VS.BytecodeLength = VertexShader->GetBufferSize();
     PipelineDesc.PS.pShaderBytecode = PixelShader->GetBufferPointer();
     PipelineDesc.PS.BytecodeLength = PixelShader->GetBufferSize();
 
-    // Blending off: the pixel shader's colour replaces what is there.  The
-    // factors still have to be valid values, and all four channels written.
     D3D12_RENDER_TARGET_BLEND_DESC *Blend = &PipelineDesc.BlendState.RenderTarget[0];
     Blend->BlendEnable = FALSE;
     Blend->LogicOpEnable = FALSE;
@@ -648,10 +768,8 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     Blend->BlendOpAlpha = D3D12_BLEND_OP_ADD;
     Blend->LogicOp = D3D12_LOGIC_OP_NOOP;
     Blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    PipelineDesc.SampleMask = 0xFFFFFFFF;     // every sample (there is one)
+    PipelineDesc.SampleMask = 0xFFFFFFFF;
 
-    // Solid, back faces culled - clockwise is the front (Luna 5.10.2).  The
-    // fields not set stay 0: off.
     PipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     PipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     PipelineDesc.RasterizerState.FrontCounterClockwise = FALSE;
@@ -660,8 +778,6 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     PipelineDesc.RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
     PipelineDesc.RasterizerState.DepthClipEnable = TRUE;
 
-    // Depth test on: a pixel is drawn only if it is nearer than what is
-    // already there, and then it becomes the nearest.  Stencil off.
     D3D12_DEPTH_STENCIL_DESC *DepthStencil = &PipelineDesc.DepthStencilState;
     DepthStencil->DepthEnable = TRUE;
     DepthStencil->DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -677,8 +793,6 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     PipelineDesc.InputLayout.pInputElementDescs = InputLayout;
     PipelineDesc.InputLayout.NumElements = (UINT)ArrayCount(InputLayout);
     PipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-
-    // Must match what it draws into: the back buffer and the depth buffer.
     PipelineDesc.NumRenderTargets = 1;
     PipelineDesc.RTVFormats[0] = SWAP_CHAIN_FORMAT;
     PipelineDesc.DSVFormat = DEPTH_FORMAT;
@@ -687,9 +801,7 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 
     b32 NoPipeline =
         DX12_FAILED(Renderer->Device->CreateGraphicsPipelineState(&PipelineDesc,
-                                                                  IID_PPV_ARGS(&Renderer->TrianglePipeline)));
-
-    // The pipeline keeps its own copy of the compiled shaders.
+                                                                  IID_PPV_ARGS(&Renderer->CubePipeline)));
     ReleaseAndZero(VertexShader);
     ReleaseAndZero(PixelShader);
     if(NoPipeline)
@@ -698,58 +810,76 @@ CreateTriangle(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     }
 
     // ------------------------------------------------------------------
-    // 5. The vertices, in clip space: x and y -1..1 across the window, z
-    //    0..1 into it.  Top, then bottom right, then bottom left - CLOCKWISE
-    //    on screen, so it faces us and is not culled.
+    // 5. NEW: the 8 corners of a 2x2x2 cube around the origin, each its
+    //    own colour (Luna's).  Real positions now, in the cube's own
+    //    "local" space - the World matrix moves them every frame.
     // ------------------------------------------------------------------
     color_vertex Vertices[] =
     {
-        {{ 0.0f,  0.5f, 0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},   // top: red
-        {{ 0.5f, -0.5f, 0.5f}, {0.0f, 1.0f, 0.0f, 1.0f}},   // bottom right: green
-        {{-0.5f, -0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},   // bottom left: blue
+        {{-1.0f, -1.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},     // 0: white
+        {{-1.0f, +1.0f, -1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},     // 1: black
+        {{+1.0f, +1.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},     // 2: red
+        {{+1.0f, -1.0f, -1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},     // 3: green
+        {{-1.0f, -1.0f, +1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},     // 4: blue
+        {{-1.0f, +1.0f, +1.0f}, {1.0f, 1.0f, 0.0f, 1.0f}},     // 5: yellow
+        {{+1.0f, +1.0f, +1.0f}, {0.0f, 1.0f, 1.0f, 1.0f}},     // 6: cyan
+        {{+1.0f, -1.0f, +1.0f}, {1.0f, 0.0f, 1.0f, 1.0f}},     // 7: magenta
     };
 
-    // An UPLOAD heap: memory the CPU can write and the GPU can read (Luna
-    // 4.1.14).  Fine for three vertices that never change; bigger meshes go
-    // in a DEFAULT heap with a copy, in milestone 5.
-    D3D12_HEAP_PROPERTIES UploadHeap = {};
-    UploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    // ------------------------------------------------------------------
+    // 6. NEW: the index buffer (Luna 6.3).  2 triangles per face, 6 faces,
+    //    36 indices into the 8 corners - each corner is shared by several
+    //    triangles instead of being repeated.  Every triangle is clockwise
+    //    seen from OUTSIDE the cube, so the faces turned away get culled.
+    //    16-bit indices: plenty for 8 vertices, and half the memory.
+    // ------------------------------------------------------------------
+    u16 Indices[] =
+    {
+        0, 1, 2,   0, 2, 3,     // front  (z = -1)
+        4, 6, 5,   4, 7, 6,     // back   (z = +1)
+        4, 5, 1,   4, 1, 0,     // left   (x = -1)
+        3, 2, 6,   3, 6, 7,     // right  (x = +1)
+        1, 5, 6,   1, 6, 2,     // top    (y = +1)
+        4, 0, 3,   4, 3, 7,     // bottom (y = -1)
+    };
 
-    // A buffer is a 1D run of bytes: Width is its size, the rest is fixed.
-    D3D12_RESOURCE_DESC BufferDesc = {};
-    BufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    BufferDesc.Width = sizeof(Vertices);
-    BufferDesc.Height = 1;
-    BufferDesc.DepthOrArraySize = 1;
-    BufferDesc.MipLevels = 1;
-    BufferDesc.Format = DXGI_FORMAT_UNKNOWN;
-    BufferDesc.SampleDesc.Count = 1;
-    BufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-    // GENERIC_READ: the state an upload-heap resource has to stay in.
-    if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE,
-                                                             &BufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ,
-                                                             0, IID_PPV_ARGS(&Renderer->TriangleVertexBuffer))))
+    if(!CreateStaticBuffer(Renderer, Thread, Memory, Vertices, sizeof(Vertices), &Renderer->CubeVertexBuffer) ||
+       !CreateStaticBuffer(Renderer, Thread, Memory, Indices, sizeof(Indices), &Renderer->CubeIndexBuffer))
     {
         return(false);
     }
 
-    // Map: a CPU pointer to the buffer's memory.  The empty read range says
-    // the CPU will not read from it.  Copy the vertices in, then Unmap.
-    void *Mapped = 0;
+    Renderer->CubeVertexBufferView.BufferLocation = Renderer->CubeVertexBuffer->GetGPUVirtualAddress();
+    Renderer->CubeVertexBufferView.SizeInBytes = (UINT)sizeof(Vertices);
+    Renderer->CubeVertexBufferView.StrideInBytes = (UINT)sizeof(color_vertex);
+
+    // The index buffer's view: where, how many bytes, and how big each index is.
+    Renderer->CubeIndexBufferView.BufferLocation = Renderer->CubeIndexBuffer->GetGPUVirtualAddress();
+    Renderer->CubeIndexBufferView.SizeInBytes = (UINT)sizeof(Indices);
+    Renderer->CubeIndexBufferView.Format = DXGI_FORMAT_R16_UINT;
+    Renderer->CubeIndexCount = (u32)ArrayCount(Indices);
+
+    // ------------------------------------------------------------------
+    // 7. NEW: the constant buffer (Luna 6.6.1) - two 256-byte slots, slot
+    //    0 for ObjectConstants and slot 1 for PassConstants.  An UPLOAD
+    //    heap, because the CPU rewrites it every frame, and mapped once,
+    //    here, for good: an upload heap may stay mapped while the GPU uses
+    //    it.
+    // ------------------------------------------------------------------
+    D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
+    D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer(2*CONSTANT_BUFFER_SLOT_SIZE);
+    if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &ConstantDesc,
+                                                             D3D12_RESOURCE_STATE_GENERIC_READ, 0,
+                                                             IID_PPV_ARGS(&Renderer->ConstantBuffer))))
+    {
+        return(false);
+    }
+
     D3D12_RANGE NoRead = {0, 0};
-    if(DX12_FAILED(Renderer->TriangleVertexBuffer->Map(0, &NoRead, &Mapped)))
+    if(DX12_FAILED(Renderer->ConstantBuffer->Map(0, &NoRead, (void **)&Renderer->ConstantBufferMapped)))
     {
         return(false);
     }
-    memcpy(Mapped, Vertices, sizeof(Vertices));
-    Renderer->TriangleVertexBuffer->Unmap(0, 0);
-
-    // The view (Luna 6.2): where the vertices are, how many bytes in all,
-    // and how many per vertex.  No descriptor heap needed.
-    Renderer->TriangleVertexBufferView.BufferLocation = Renderer->TriangleVertexBuffer->GetGPUVirtualAddress();
-    Renderer->TriangleVertexBufferView.SizeInBytes = (UINT)sizeof(Vertices);
-    Renderer->TriangleVertexBufferView.StrideInBytes = (UINT)sizeof(color_vertex);
 
     return(true);
 }
@@ -1132,9 +1262,9 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     {
         RendererLog(Thread, Memory, "ERROR: No shader compiler - nothing will be drawn.\n");
     }
-    else if(!CreateTriangle(Renderer, Thread, Memory))
+    else if(!CreateCube(Renderer, Thread, Memory))
     {
-        RendererLog(Thread, Memory, "ERROR: No triangle - see the errors above.\n");
+        RendererLog(Thread, Memory, "ERROR: No cube - see the errors above.\n");
     }
 
     return(true);
@@ -1191,9 +1321,11 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 
 // Input holds this frame's keyboard and mouse (see platform.h), and
 // Input->dtForFrame how long the last frame took, for anything that moves.
+// CubeWorld and ViewProj are ordinary row-vector matrices from the game, as
+// XMFLOAT4X4 - DirectXMath's storage type, safe to pass around.
 internal void
 RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
-               game_input *Input)
+               game_input *Input, const XMFLOAT4X4 *CubeWorld, const XMFLOAT4X4 *ViewProj)
 {
     if(!Renderer->SwapChain || !Renderer->BackBuffers[0] || !Renderer->DepthBuffer)
     {
@@ -1258,13 +1390,42 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     Renderer->CommandList->RSSetScissorRects(1, &Scissor);
 
     //NOTE:(yigit): Drawing
-    if(Renderer->TrianglePipeline && Renderer->TriangleVertexBuffer)
+    // Milestone 5: the cube.  First its constants, written by the CPU
+    // straight into the mapped upload buffer.  Safe only because the last
+    // frame ended with a flush, so the GPU is not reading them right now.
+    // (Frames in flight - Luna chapter 7 - will need one copy per frame.)
+    if(Renderer->CubePipeline && Renderer->ConstantBufferMapped)
     {
-        Renderer->CommandList->SetGraphicsRootSignature(Renderer->TriangleRootSignature);
-        Renderer->CommandList->SetPipelineState(Renderer->TrianglePipeline);
+        // TRANSPOSED on the way in, exactly as Luna does (6.6.3): HLSL reads
+        // a float4x4 in a constant buffer column by column, while these are
+        // stored row by row.  XMLoadFloat4x4 brings a matrix into an
+        // XMMATRIX - SSE registers - for the maths; XMStoreFloat4x4 writes
+        // it back out to plain floats.
+        object_constants Object;
+        pass_constants Pass;
+        XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(CubeWorld)));
+        XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
+
+        memcpy(Renderer->ConstantBufferMapped + 0*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
+        memcpy(Renderer->ConstantBufferMapped + 1*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
+
+        // Where those two slots are, as the GPU sees them.
+        D3D12_GPU_VIRTUAL_ADDRESS Constants = Renderer->ConstantBuffer->GetGPUVirtualAddress();
+
+        Renderer->CommandList->SetGraphicsRootSignature(Renderer->CubeRootSignature);
+        Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
+
+        // Root parameter 0 (b0) and 1 (b1): just the addresses.
+        Renderer->CommandList->SetGraphicsRootConstantBufferView(0, Constants + 0*CONSTANT_BUFFER_SLOT_SIZE);
+        Renderer->CommandList->SetGraphicsRootConstantBufferView(1, Constants + 1*CONSTANT_BUFFER_SLOT_SIZE);
+
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        Renderer->CommandList->IASetVertexBuffers(0, 1, &Renderer->TriangleVertexBufferView);
-        Renderer->CommandList->DrawInstanced(3, 1, 0, 0);
+        Renderer->CommandList->IASetVertexBuffers(0, 1, &Renderer->CubeVertexBufferView);
+        Renderer->CommandList->IASetIndexBuffer(&Renderer->CubeIndexBufferView);
+
+        // 36 indices, 1 instance, starting at index 0, adding 0 to each
+        // index, instance 0 (Luna 6.3).
+        Renderer->CommandList->DrawIndexedInstanced(Renderer->CubeIndexCount, 1, 0, 0, 0);
     }
 
     // Dear ImGui last, so it is on top of everything.  Its font texture is
@@ -1375,9 +1536,16 @@ RendererShutdown(dx12_renderer *Renderer)
     // ImGui uses SrvHeap, so it must be stopped first - GameShutdown and
     // GameUnload see to that.
     Assert(!Renderer->ImGui);
-    ReleaseAndZero(Renderer->TriangleVertexBuffer);
-    ReleaseAndZero(Renderer->TrianglePipeline);
-    ReleaseAndZero(Renderer->TriangleRootSignature);
+    if(Renderer->ConstantBuffer && Renderer->ConstantBufferMapped)
+    {
+        Renderer->ConstantBuffer->Unmap(0, 0);
+        Renderer->ConstantBufferMapped = 0;
+    }
+    ReleaseAndZero(Renderer->ConstantBuffer);
+    ReleaseAndZero(Renderer->CubeIndexBuffer);
+    ReleaseAndZero(Renderer->CubeVertexBuffer);
+    ReleaseAndZero(Renderer->CubePipeline);
+    ReleaseAndZero(Renderer->CubeRootSignature);
     ReleaseAndZero(Renderer->DxcCompiler);
     ReleaseAndZero(Renderer->DxcUtils);
     if(Renderer->DxcModule)

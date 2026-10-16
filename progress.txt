@@ -96,8 +96,11 @@ LOG
          Milestone 4: the first triangle - typed by hand - with its
          shader in data/shaders/triangle.hlsl: root signature, pipeline
          state object, an upload-heap vertex buffer, DrawInstanced.
+         Milestone 5: the spinning cube in data/shaders/cube.hlsl - an
+         index buffer, vertex and index buffers in VRAM through an upload
+         (CreateStaticBuffer), two root CBVs (World, ViewProj) from a
+         mapped constant buffer, DirectXMath matrices transposed on the
+         way in.  The triangle is gone.
   Hours
-  Next   Milestone 5, the cube: an index buffer, a DEFAULT-heap vertex
-         buffer with a proper upload, a constant buffer with the
-         camera's matrices.  Chapter 6 exercises 4, 7, 8 and 9 along the
-         way.
+  Next   Chapter 6 exercises 4, 7, 8 and 9 on the cube.  Then chapter 7:
+         frame resources, so the CPU and GPU stop taking turns.
