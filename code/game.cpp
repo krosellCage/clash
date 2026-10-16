@@ -210,8 +210,6 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // then look at it, then project it.
     r32 Time = (r32)State->TimeSeconds;
     XMMATRIX Spin = XMMatrixRotationY(Time) * XMMatrixRotationX(0.5f*Time);
-    XMMATRIX CubeWorldMatrix    = Spin * XMMatrixTranslation(-2.0f, 0.0f, 0.0f);   // cube to the left
-    XMMATRIX PyramidWorldMatrix = Spin * XMMatrixTranslation(+2.0f, 0.0f, 0.0f);   // pyramid to the right
     // The camera's view, from its position, a point one unit ahead, and its
     // up.  XMLoadVec3 (game_directx_math.h) turns our vec3s into XMVECTORs:
     // W = 1 for the two points, 0 for the up direction.
@@ -221,10 +219,24 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
                                      XMLoadVec3(Camera->Up, 0.0f));
     XMMATRIX Projection = XMMatrixPerspectiveFovLH(Camera->Zoom, Aspect, 0.1f, 500.0f);
 
-    XMFLOAT4X4 Worlds[2];
+    XMFLOAT4X4 Worlds[BOX_COUNT];
+    for(i32 Row = 0; Row < 3; ++Row)
+    {
+        for(i32 Column = 0; Column < 3; ++Column)
+        {
+            // 1. Where this box sits.  Column/Row go 0,1,2; minus 1 gives -1,0,+1 so the grid is centred.
+            r32 X = (r32)(Column - 1) * 3.0f;
+            r32 Y = (r32)(Row - 1) * 3.0f;
+
+            // 2. Its World: spin in place, then move to (X, Y, 0).
+            XMMATRIX BoxWorld = Spin * XMMatrixTranslation(X, Y, 0.0f);
+
+            // 3. Store it in this box's place in the array.
+            XMStoreFloat4x4(&Worlds[Row*3 + Column], BoxWorld);
+        }
+    }
+
     XMFLOAT4X4 ViewProj;
-    XMStoreFloat4x4(&Worlds[0], CubeWorldMatrix);
-    XMStoreFloat4x4(&Worlds[1], PyramidWorldMatrix);
     XMStoreFloat4x4(&ViewProj, View * Projection);
     RendererRender(Renderer, Thread, Memory, Input, Worlds, &ViewProj, Time);
 }

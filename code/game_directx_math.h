@@ -41,7 +41,7 @@
 */
 
 #include <DirectXMath.h>
-
+#include <DirectXPackedVector.h>
 /*
   NOTE(yigit): SimpleMath - DirectXTK12's friendlier face for DirectXMath,
   which Luna's 2nd edition uses from chapter 24 on (and his MathHelper
@@ -80,7 +80,7 @@
 // DirectX::XMVECTOR.  Every name in the namespace starts with XM, so nothing
 // of ours can collide with it.
 using namespace DirectX;
-
+using namespace DirectX::PackedVector;
 // NOTE(yigit): The same short names Luna's MathHelper.h uses.  Named one by
 // one rather than "using namespace DirectX::SimpleMath" - that would also
 // pull in SimpleMath::Rectangle, which collides with the Win32 GDI function

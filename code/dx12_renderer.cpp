@@ -80,16 +80,17 @@
 
 // Constant buffers must start on 256-byte boundaries, so each one gets a 256-byte slot.
 #define CONSTANT_BUFFER_SLOT_SIZE D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT
+#define BOX_COUNT 9
 
 // Positions only: vertex buffer slot 0.
 struct VPosData
 {
- XMFLOAT3 Pos;
+    XMFLOAT3 Pos;
 };
 // Colours only: vertex buffer slot 1.
 struct VColorData
 {
- XMFLOAT4 Color;
+    XMCOLOR Color;
 };
 
 // Byte-for-byte copies of cube.hlsl's cbuffers b0 and b1, filled with transposed
@@ -725,8 +726,8 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
             D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0,
-            D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}
+        {"COLOR", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 1, 0,
+            D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
     // ------------------------------------------------------------------
@@ -905,7 +906,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     //    left mapped, which upload heaps allow.
     // ------------------------------------------------------------------
     D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
-    D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer(3*CONSTANT_BUFFER_SLOT_SIZE);
+    D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer((BOX_COUNT + 1)*CONSTANT_BUFFER_SLOT_SIZE);
     if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &ConstantDesc,
                                                              D3D12_RESOURCE_STATE_GENERIC_READ, 0,
                                                              IID_PPV_ARGS(&Renderer->ConstantBuffer))))
@@ -1267,9 +1268,9 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     Renderer->SrvFreeCount = 0;
 
     // Hot pink (255, 105, 180), so the cleared background is obvious; the debug UI can change it.
-    Renderer->ClearColor[0] = 1.0f;
-    Renderer->ClearColor[1] = 0.41f;
-    Renderer->ClearColor[2] = 0.71f;
+    Renderer->ClearColor[0] = 0.0f;
+    Renderer->ClearColor[1] = 0.0f;
+    Renderer->ClearColor[2] = 0.0f;
     Renderer->ClearColor[3] = 1.0f;
 
     // A missing compiler or cube isn't fatal: the game runs with just the clear colour.
@@ -1397,38 +1398,37 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         // Transpose because HLSL reads constant-buffer matrices column by column.
         object_constants Object;
         pass_constants Pass;
-        // Cube: fill the box, copy it to slot 0.
-        XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(&Worlds[0])));
-        memcpy(Renderer->ConstantBufferMapped + 0*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
-
-        // Pyramid: refill the box, copy it to slot 1.
-        XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(&Worlds[1])));
-        memcpy(Renderer->ConstantBufferMapped + 1*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
+        // Each box: fill the box with its World, copy it to its own slot.
+        for(u32 BoxIndex = 0; BoxIndex < BOX_COUNT; ++BoxIndex)
+        {
+            XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(&Worlds[BoxIndex])));
+            memcpy(Renderer->ConstantBufferMapped + BoxIndex*CONSTANT_BUFFER_SLOT_SIZE,
+                    &Object, sizeof(Object));
+        }
 
         // Pass: camera and time, to slot 2.
         XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
         Pass.gTime = Time;
-        memcpy(Renderer->ConstantBufferMapped + 2*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
+        memcpy(Renderer->ConstantBufferMapped + BOX_COUNT*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
         D3D12_GPU_VIRTUAL_ADDRESS Constants = Renderer->ConstantBuffer->GetGPUVirtualAddress();
 
         Renderer->CommandList->SetGraphicsRootSignature(Renderer->CubeRootSignature);
         Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
 
         // Point b0 and b1 at their slots.
-        Renderer->CommandList->SetGraphicsRootConstantBufferView(1, Constants + 2*CONSTANT_BUFFER_SLOT_SIZE);
+        Renderer->CommandList->SetGraphicsRootConstantBufferView(1, Constants + BOX_COUNT*CONSTANT_BUFFER_SLOT_SIZE);
         // Every 3 indices form one triangle; positions from slot 0, colours from slot 1.
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         mesh *Mesh = &Renderer->CubeMesh;
         Renderer->CommandList->IASetVertexBuffers(0, 2, Mesh->VertexViews);
         Renderer->CommandList->IASetIndexBuffer(&Mesh->IndexView);
 
-        // Buffers are bound once; each submesh then draws its own index range.  One instance.
-        for(u32 SubmeshIndex = 0; SubmeshIndex < Mesh->SubmeshCount; ++SubmeshIndex)
+        submesh *Box = &Mesh->Submeshes[0];
+        for(u32 BoxIndex = 0; BoxIndex < BOX_COUNT; ++BoxIndex)
         {
-            submesh *Submesh = &Mesh->Submeshes[SubmeshIndex];
-            Renderer->CommandList->SetGraphicsRootConstantBufferView(0, Constants + SubmeshIndex*CONSTANT_BUFFER_SLOT_SIZE);
-            Renderer->CommandList->DrawIndexedInstanced(Submesh->IndexCount, 1, Submesh->StartIndex,
-                                                        Submesh->BaseVertex, 0);
+            Renderer->CommandList->SetGraphicsRootConstantBufferView(0, Constants + BoxIndex*CONSTANT_BUFFER_SLOT_SIZE);
+            Renderer->CommandList->DrawIndexedInstanced(Box->IndexCount, 1, Box->StartIndex,
+                    Box->BaseVertex, 0);
         }
     }
 
