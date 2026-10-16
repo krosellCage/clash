@@ -225,7 +225,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     XMStoreFloat4x4(&CubeWorld, World);
     XMStoreFloat4x4(&ViewProj, View * Projection);
 
-    RendererRender(Renderer, Thread, Memory, Input, &CubeWorld, &ViewProj);
+    RendererRender(Renderer, Thread, Memory, Input, &CubeWorld, &ViewProj, Time);
 }
 
 extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)

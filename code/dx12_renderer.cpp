@@ -102,6 +102,7 @@ struct object_constants
 struct pass_constants
 {
     XMFLOAT4X4 ViewProj;
+    r32 gTime;
 };
 
 // Fail the build if a constants struct no longer fits its 256-byte slot.
@@ -805,26 +806,20 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     // ------------------------------------------------------------------
     VPosData Positions[] =
     {
-        {{-1.0f, -1.0f, -1.0f}},    // 0
-        {{-1.0f, +1.0f, -1.0f}},    // 1
-        {{+1.0f, +1.0f, -1.0f}},    // 2
-        {{+1.0f, -1.0f, -1.0f}},    // 3
-        {{-1.0f, -1.0f, +1.0f}},    // 4
-        {{-1.0f, +1.0f, +1.0f}},    // 5
-        {{+1.0f, +1.0f, +1.0f}},    // 6
-        {{+1.0f, -1.0f, +1.0f}},    // 7
+        {{-1.0f, -1.0f, -1.0f}},
+        {{+1.0f, -1.0f, -1.0f}},
+        {{-1.0f, -1.0f, +1.0f}},
+        {{+1.0f, -1.0f, +1.0f}},
+        {{+0.0f, +1.0f, +0.0f}},
     };
 
     VColorData Colors[] =
     {
-        {{1.0f, 1.0f, 1.0f, 1.0f}},     // 0: white
-        {{0.0f, 0.0f, 0.0f, 1.0f}},     // 1: black
-        {{1.0f, 0.0f, 0.0f, 1.0f}},     // 2: red
+        {{0.0f, 1.0f, 0.0f, 1.0f}}, 
+        {{0.0f, 1.0f, 0.0f, 1.0f}}, 
+        {{0.0f, 1.0f, 0.0f, 1.0f}}, 
         {{0.0f, 1.0f, 0.0f, 1.0f}},     // 3: green
-        {{0.0f, 0.0f, 1.0f, 1.0f}},     // 4: blue
-        {{1.0f, 1.0f, 0.0f, 1.0f}},     // 5: yellow
-        {{0.0f, 1.0f, 1.0f, 1.0f}},     // 6: cyan
-        {{1.0f, 0.0f, 1.0f, 1.0f}},     // 7: magenta
+        {{1.0f, 0.0f, 0.0f, 1.0f}},     // 3: green
     };
 
     // ------------------------------------------------------------------
@@ -834,12 +829,9 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     // ------------------------------------------------------------------
     u16 Indices[] =
     {
-        0, 1, 2,   0, 2, 3,     // front  (z = -1)
-        4, 6, 5,   4, 7, 6,     // back   (z = +1)
-        4, 5, 1,   4, 1, 0,     // left   (x = -1)
-        3, 2, 6,   3, 6, 7,     // right  (x = +1)
-        1, 5, 6,   1, 6, 2,     // top    (y = +1)
-        4, 0, 3,   4, 3, 7,     // bottom (y = -1)
+        0, 1, 3,   0, 3, 2,     // front  (z = -1)
+        0, 4, 1,   1, 4, 3,
+        2, 3, 4,   0, 2, 4,
     };
 
     // Upload positions, colours and indices to VRAM.
@@ -1309,7 +1301,7 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 // CubeWorld and ViewProj are row-vector matrices from the game.
 internal void
 RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
-               game_input *Input, const XMFLOAT4X4 *CubeWorld, const XMFLOAT4X4 *ViewProj)
+               game_input *Input, const XMFLOAT4X4 *CubeWorld, const XMFLOAT4X4 *ViewProj, r32 Time)
 {
     if(!Renderer->SwapChain || !Renderer->BackBuffers[0] || !Renderer->DepthBuffer)
     {
@@ -1373,7 +1365,7 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         pass_constants Pass;
         XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(CubeWorld)));
         XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
-
+        Pass.gTime= Time;
         // Write straight into the mapped constant buffer.  Safe only because
         // last frame's flush means the GPU isn't reading it now.
         memcpy(Renderer->ConstantBufferMapped + 0*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
