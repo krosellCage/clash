@@ -800,38 +800,71 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     }
 
     // ------------------------------------------------------------------
-    // 5. The cube's 8 corners in its local space (the World matrix moves
-    //    them), split into two arrays for the two vertex buffers.  Same
-    //    order in both: vertex i is Positions[i] with Colors[i].
+    // 5. Two shapes packed into one pair of vertex buffers: the cube's 8
+    //    corners, then the pyramid's 5, each in its own local space (the
+    //    World matrix moves them).  Same order in both arrays: vertex i is
+    //    Positions[i] with Colors[i].
     // ------------------------------------------------------------------
     VPosData Positions[] =
     {
-        {{-1.0f, -1.0f, -1.0f}},
-        {{+1.0f, -1.0f, -1.0f}},
-        {{-1.0f, -1.0f, +1.0f}},
-        {{+1.0f, -1.0f, +1.0f}},
-        {{+0.0f, +1.0f, +0.0f}},
+        // Cube: vertices 0-7.
+        {{-1.0f, -1.0f, -1.0f}},    // 0
+        {{-1.0f, +1.0f, -1.0f}},    // 1
+        {{+1.0f, +1.0f, -1.0f}},    // 2
+        {{+1.0f, -1.0f, -1.0f}},    // 3
+        {{-1.0f, -1.0f, +1.0f}},    // 4
+        {{-1.0f, +1.0f, +1.0f}},    // 5
+        {{+1.0f, +1.0f, +1.0f}},    // 6
+        {{+1.0f, -1.0f, +1.0f}},    // 7
+
+        // Pyramid: vertices 8-12, numbered 0-4 in its own indices.
+        {{-1.0f, -1.0f, -1.0f}},    // 0: base
+        {{+1.0f, -1.0f, -1.0f}},    // 1: base
+        {{-1.0f, -1.0f, +1.0f}},    // 2: base
+        {{+1.0f, -1.0f, +1.0f}},    // 3: base
+        {{+0.0f, +1.0f, +0.0f}},    // 4: tip
     };
 
     VColorData Colors[] =
     {
-        {{0.0f, 1.0f, 0.0f, 1.0f}}, 
-        {{0.0f, 1.0f, 0.0f, 1.0f}}, 
-        {{0.0f, 1.0f, 0.0f, 1.0f}}, 
+        // Cube.
+        {{1.0f, 1.0f, 1.0f, 1.0f}},     // 0: white
+        {{0.0f, 0.0f, 0.0f, 1.0f}},     // 1: black
+        {{1.0f, 0.0f, 0.0f, 1.0f}},     // 2: red
         {{0.0f, 1.0f, 0.0f, 1.0f}},     // 3: green
-        {{1.0f, 0.0f, 0.0f, 1.0f}},     // 3: green
+        {{0.0f, 0.0f, 1.0f, 1.0f}},     // 4: blue
+        {{1.0f, 1.0f, 0.0f, 1.0f}},     // 5: yellow
+        {{0.0f, 1.0f, 1.0f, 1.0f}},     // 6: cyan
+        {{1.0f, 0.0f, 1.0f, 1.0f}},     // 7: magenta
+
+        // Pyramid.
+        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 0: green
+        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 1: green
+        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 2: green
+        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 3: green
+        {{1.0f, 0.0f, 0.0f, 1.0f}},     // 4: red
     };
 
     // ------------------------------------------------------------------
-    // 6. Indices: 12 triangles from the 8 shared corners, so no corner is
-    //    stored twice.  Clockwise seen from outside, so back faces cull.
-    //    16-bit: enough for 8 vertices, half the memory of 32-bit.
+    // 6. Indices, cube's then pyramid's.  Each shape's indices count from
+    //    its own vertex 0, unchanged - the submesh's BaseVertex shifts them.
+    //    Clockwise seen from outside, so back faces cull.  16-bit: half
+    //    the memory of 32-bit.
     // ------------------------------------------------------------------
     u16 Indices[] =
     {
-        0, 1, 3,   0, 3, 2,     // front  (z = -1)
-        0, 4, 1,   1, 4, 3,
-        2, 3, 4,   0, 2, 4,
+        // Cube: 36 indices, 12 triangles.
+        0, 1, 2,   0, 2, 3,     // front  (z = -1)
+        4, 6, 5,   4, 7, 6,     // back   (z = +1)
+        4, 5, 1,   4, 1, 0,     // left   (x = -1)
+        3, 2, 6,   3, 6, 7,     // right  (x = +1)
+        1, 5, 6,   1, 6, 2,     // top    (y = +1)
+        4, 0, 3,   4, 3, 7,     // bottom (y = -1)
+
+        // Pyramid: 18 indices, 6 triangles.
+        0, 1, 3,   0, 3, 2,     // base   (y = -1)
+        0, 4, 1,   1, 4, 3,     // sides at z = -1 and x = +1
+        2, 3, 4,   0, 2, 4,     // sides at z = +1 and x = -1
     };
 
     // Upload positions, colours and indices to VRAM.
@@ -859,19 +892,20 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     Mesh->IndexView.SizeInBytes = (UINT)sizeof(Indices);
     Mesh->IndexView.Format = DXGI_FORMAT_R16_UINT;
 
-    // One submesh covering all 36 indices.
-    Mesh->SubmeshCount = 1;
-    Mesh->Submeshes[0].IndexCount = (u32)ArrayCount(Indices);
+    Mesh->SubmeshCount = 2;
+    Mesh->Submeshes[0].IndexCount = 36;
     Mesh->Submeshes[0].StartIndex = 0;
     Mesh->Submeshes[0].BaseVertex = 0;
-
+    Mesh->Submeshes[1].IndexCount = 18;
+    Mesh->Submeshes[1].StartIndex = 36;
+    Mesh->Submeshes[1].BaseVertex = 8;
     // ------------------------------------------------------------------
     // 7. Constant buffer: two 256-byte slots (World, ViewProj) in an UPLOAD
     //    heap because the CPU rewrites them every frame.  Mapped once and
     //    left mapped, which upload heaps allow.
     // ------------------------------------------------------------------
     D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
-    D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer(2*CONSTANT_BUFFER_SLOT_SIZE);
+    D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer(3*CONSTANT_BUFFER_SLOT_SIZE);
     if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &ConstantDesc,
                                                              D3D12_RESOURCE_STATE_GENERIC_READ, 0,
                                                              IID_PPV_ARGS(&Renderer->ConstantBuffer))))
@@ -1301,7 +1335,7 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 // CubeWorld and ViewProj are row-vector matrices from the game.
 internal void
 RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
-               game_input *Input, const XMFLOAT4X4 *CubeWorld, const XMFLOAT4X4 *ViewProj, r32 Time)
+               game_input *Input, const XMFLOAT4X4 *Worlds, const XMFLOAT4X4 *ViewProj, r32 Time)
 {
     if(!Renderer->SwapChain || !Renderer->BackBuffers[0] || !Renderer->DepthBuffer)
     {
@@ -1363,23 +1397,25 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         // Transpose because HLSL reads constant-buffer matrices column by column.
         object_constants Object;
         pass_constants Pass;
-        XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(CubeWorld)));
-        XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
-        Pass.gTime= Time;
-        // Write straight into the mapped constant buffer.  Safe only because
-        // last frame's flush means the GPU isn't reading it now.
+        // Cube: fill the box, copy it to slot 0.
+        XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(&Worlds[0])));
         memcpy(Renderer->ConstantBufferMapped + 0*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
-        memcpy(Renderer->ConstantBufferMapped + 1*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
 
+        // Pyramid: refill the box, copy it to slot 1.
+        XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(&Worlds[1])));
+        memcpy(Renderer->ConstantBufferMapped + 1*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
+
+        // Pass: camera and time, to slot 2.
+        XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
+        Pass.gTime = Time;
+        memcpy(Renderer->ConstantBufferMapped + 2*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
         D3D12_GPU_VIRTUAL_ADDRESS Constants = Renderer->ConstantBuffer->GetGPUVirtualAddress();
 
         Renderer->CommandList->SetGraphicsRootSignature(Renderer->CubeRootSignature);
         Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
 
         // Point b0 and b1 at their slots.
-        Renderer->CommandList->SetGraphicsRootConstantBufferView(0, Constants + 0*CONSTANT_BUFFER_SLOT_SIZE);
-        Renderer->CommandList->SetGraphicsRootConstantBufferView(1, Constants + 1*CONSTANT_BUFFER_SLOT_SIZE);
-
+        Renderer->CommandList->SetGraphicsRootConstantBufferView(1, Constants + 2*CONSTANT_BUFFER_SLOT_SIZE);
         // Every 3 indices form one triangle; positions from slot 0, colours from slot 1.
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         mesh *Mesh = &Renderer->CubeMesh;
@@ -1390,6 +1426,7 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         for(u32 SubmeshIndex = 0; SubmeshIndex < Mesh->SubmeshCount; ++SubmeshIndex)
         {
             submesh *Submesh = &Mesh->Submeshes[SubmeshIndex];
+            Renderer->CommandList->SetGraphicsRootConstantBufferView(0, Constants + SubmeshIndex*CONSTANT_BUFFER_SLOT_SIZE);
             Renderer->CommandList->DrawIndexedInstanced(Submesh->IndexCount, 1, Submesh->StartIndex,
                                                         Submesh->BaseVertex, 0);
         }

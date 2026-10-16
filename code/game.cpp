@@ -209,8 +209,9 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // round.  World * View * Projection, read left to right: place the cube,
     // then look at it, then project it.
     r32 Time = (r32)State->TimeSeconds;
-    XMMATRIX World = XMMatrixRotationY(Time) * XMMatrixRotationX(0.5f*Time);
-
+    XMMATRIX Spin = XMMatrixRotationY(Time) * XMMatrixRotationX(0.5f*Time);
+    XMMATRIX CubeWorldMatrix    = Spin * XMMatrixTranslation(-2.0f, 0.0f, 0.0f);   // cube to the left
+    XMMATRIX PyramidWorldMatrix = Spin * XMMatrixTranslation(+2.0f, 0.0f, 0.0f);   // pyramid to the right
     // The camera's view, from its position, a point one unit ahead, and its
     // up.  XMLoadVec3 (game_directx_math.h) turns our vec3s into XMVECTORs:
     // W = 1 for the two points, 0 for the up direction.
@@ -220,12 +221,12 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
                                      XMLoadVec3(Camera->Up, 0.0f));
     XMMATRIX Projection = XMMatrixPerspectiveFovLH(Camera->Zoom, Aspect, 0.1f, 500.0f);
 
-    XMFLOAT4X4 CubeWorld;
+    XMFLOAT4X4 Worlds[2];
     XMFLOAT4X4 ViewProj;
-    XMStoreFloat4x4(&CubeWorld, World);
+    XMStoreFloat4x4(&Worlds[0], CubeWorldMatrix);
+    XMStoreFloat4x4(&Worlds[1], PyramidWorldMatrix);
     XMStoreFloat4x4(&ViewProj, View * Projection);
-
-    RendererRender(Renderer, Thread, Memory, Input, &CubeWorld, &ViewProj, Time);
+    RendererRender(Renderer, Thread, Memory, Input, Worlds, &ViewProj, Time);
 }
 
 extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)
