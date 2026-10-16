@@ -1,7 +1,5 @@
 /*
-  NOTE(yigit): Everything DirectX 12 lives here.  This file is YOURS - it
-  starts empty on purpose.
-
+  NOTE(yigit): Everything DirectX 12 lives here.
   It is part of the game DLL, and game.cpp calls it:
 
     RendererInitialize  once, on the first frame
@@ -29,14 +27,10 @@
     6. A textured cube: descriptor heaps, a texture, the upload path.
 */
 
-// game.cpp includes this first, and game_imgui.cpp includes it again so it
-// makes sense on its own in the editor - the guard keeps it to once.
+// Include guard: game_imgui.cpp includes this file too, so it must compile once.
 #if !defined(DX12_RENDERER_CPP)
 
-// b32, internal, game_input, game_memory...  game.cpp has already
-// included this before it includes us, so in the build it does nothing - the
-// include guard skips it.  It is here so this file makes sense on its own,
-// to a reader and to the editor.
+// Brings in b32, internal, game_memory etc., so the file also stands alone in the editor.
 #include "game.h"
 
 // NOTE(yigit): The one file in the game layer that includes windows.h - the
@@ -45,23 +39,18 @@
 #define NOMINMAX
 #include <windows.h>
 
-// DirectX 12 itself, and DXGI - the part of Windows that owns GPUs,
-// swapchains and presenting.  d3dcompiler turns HLSL into GPU code at run
-// time.  All three .libs are already linked for game.dll in build.bat.
+// D3D12 for the device and commands, DXGI for GPUs and the swap chain, DXC to compile shaders.
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include "dxcapi.h"
 
-#include <stdio.h>      // snprintf, for the log lines
-#include <string.h>     // memcpy
-                        
-// Dear ImGui's API and its DX12 backend (see game_imgui.cpp).  Level 0: its
-// headers are not ours to keep free of -W4 warnings.  The old pre-1.91.5
-// API is switched off, so Luna's ImGui_ImplDX12_Init call cannot creep in.
-// The math operators (on ImGui's own ImVec2 only) because its .cpp files,
-// compiled later in this same unity build, need imgui.h to have them the
-// first time it is included.
+#include <stdio.h>      // snprintf: formats log lines
+#include <string.h>     // memcpy: copies data into mapped GPU memory
+
+// Dear ImGui and its DX12 backend.  Obsolete API off so old-style calls fail to
+// compile; math operators on because imgui's .cpp files need them from the first
+// include; warnings off because its headers aren't ours to fix.
 #define IMGUI_DISABLE_OBSOLETE_FUNCTIONS
 #define IMGUI_DEFINE_MATH_OPERATORS
 #pragma warning(push, 0)
@@ -69,20 +58,16 @@
 #include "backends/imgui_impl_dx12.h"
 #pragma warning(pop)
 
-// Two: one on screen, one being drawn into (double buffering).
+// Double buffering: one image on screen while the other is drawn.
 #define SWAP_CHAIN_BUFFER_COUNT 2
+// 8 bits per channel, read by shaders as 0..1: the standard display format.
 #define SWAP_CHAIN_FORMAT DXGI_FORMAT_R8G8B8A8_UNORM
 
-// The one shader-visible CBV/SRV/UAV heap - everything shaders read goes in
-// it: Dear ImGui's font texture now, the game's textures from milestone 6.
+// Slots in the one shader-visible heap; only one can be bound, so it holds everything shaders read.
 #define SRV_HEAP_CAPACITY 1024
 
-// The depth/stencil buffer (Luna 4.3.7): 32-bit float depth, plus 8 bits of
-// stencil per pixel - a mask for outlines around selected heroes, decals and
-// the like.  The other 24 bits are unused padding.  Not Luna's
-// D24_UNORM_S8_UINT: 24-bit depth has too little precision far away, and
-// reversed-Z needs float depth.  (Most GPUs store the two parts separately,
-// so the padding costs less than its 64 bits a pixel suggest.)
+// 32-bit float depth (precise far away, ready for reversed-Z) plus 8 bits of
+// stencil for masks like selection outlines.
 //
 // TODO(yigit): Reversed-Z, before the scene gets big.  A third-person
 // camera sees from the hero's feet to the horizon, and normal depth spends
@@ -90,30 +75,25 @@
 // stores 1 at the near plane and 0 at the far one: clear to 0.0f, test with
 // GREATER, and swap near and far in the projection matrix.
 #define DEPTH_FORMAT        DXGI_FORMAT_D32_FLOAT_S8X24_UINT
-#define DEPTH_CLEAR_VALUE   1.0f    // the far plane
+#define DEPTH_CLEAR_VALUE   1.0f    // far plane, so anything drawn is nearer
 #define STENCIL_CLEAR_VALUE 0       // no pixel marked
 
-/*
-  A descriptor heap (Luna 4.3.5) - an array of descriptors, one type per
-  heap, fixed in size when it is made.  Slot i lives at Start + i *
-  DescriptorSize, and the size differs between GPUs and between types, so it
-  is asked for once and kept.
-
-  Only CBV_SRV_UAV and SAMPLER heaps are shader visible - shaders read those.
-  RTVs and DSVs are only ever handed to commands, by their CPU handle, so
-  their heaps have no GPU handles at all.
-*/
+// Constant buffers must start on 256-byte boundaries, so each one gets a 256-byte slot.
 #define CONSTANT_BUFFER_SLOT_SIZE D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT
 
-struct color_vertex
+// Positions only: vertex buffer slot 0.
+struct VPosData
 {
-    XMFLOAT3 Position;
-    XMFLOAT4 Color;
+ XMFLOAT3 Pos;
+};
+// Colours only: vertex buffer slot 1.
+struct VColorData
+{
+ XMFLOAT4 Color;
 };
 
-// What cube.hlsl's two cbuffers hold - the same bytes, in the same order
-// (Luna 6.6).  XMFLOAT4X4: DirectXMath's STORAGE type for a matrix, 16
-// floats.  They hold the matrices TRANSPOSED - see RendererRender.
+// Byte-for-byte copies of cube.hlsl's cbuffers b0 and b1, filled with transposed
+// matrices because HLSL reads them column by column.
 struct object_constants
 {
     XMFLOAT4X4 World;
@@ -124,156 +104,132 @@ struct pass_constants
     XMFLOAT4X4 ViewProj;
 };
 
+// Fail the build if a constants struct no longer fits its 256-byte slot.
 static_assert(sizeof(object_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "object_constants outgrew its slot");
 static_assert(sizeof(pass_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "pass_constants outgrew its slot");
 
+// A descriptor heap plus what's needed to address slot i (Start + i * DescriptorSize).
+// The size varies by GPU and type, so it's queried once and stored.
 struct descriptor_heap
 {
     ID3D12DescriptorHeap *Heap;
-    D3D12_CPU_DESCRIPTOR_HANDLE CpuStart;   // looked up once, not on every use
-    D3D12_GPU_DESCRIPTOR_HANDLE GpuStart;   // 0 unless shader visible
+    D3D12_CPU_DESCRIPTOR_HANDLE CpuStart;   // stored so it isn't queried on every use
+    D3D12_GPU_DESCRIPTOR_HANDLE GpuStart;   // 0 for heaps shaders can't see (RTV, DSV)
     u32 DescriptorSize;
     u32 Count;
 };
 
-/*
-  Geometry (Luna 6.10's MeshGeometry and SubmeshGeometry, C-style).
-
-  A mesh is one vertex buffer and one index buffer.  Several objects can be
-  packed into the pair - Luna's Figure 6.3 - and each is a submesh: which
-  run of the index buffer it uses, and where its vertices start.  Each
-  object's indices count from 0; BaseVertex is added to every one of them
-  by the GPU, so the box's index 0 can mean vertex 8 of the shared buffer.
-
-  The three numbers are exactly DrawIndexedInstanced's: set the buffers
-  once, then draw each submesh with its own IndexCount / StartIndex /
-  BaseVertex.
-
-  Luna's version also keeps a name, CPU copies of the vertices (for picking
-  and collision) and a bounding box.  We look submeshes up by index instead
-  of by name, and collision is game code - the server has no GPU - so the
-  CPU copies stay out.  Bounds come with culling.
-*/
+// One part of a mesh: the three numbers DrawIndexedInstanced needs, so several
+// objects can share one vertex and index buffer.
 struct submesh
 {
     u32 IndexCount;
-    u32 StartIndex;     // Luna's StartIndexLocation: first index, in indices
-    i32 BaseVertex;     // Luna's BaseVertexLocation: added to every index
+    u32 StartIndex;     // first index to read, counted in indices
+    i32 BaseVertex;     // added to every index, so each object's indices can start at 0
 };
 
 #define MESH_MAX_SUBMESHES 16
 
+// Geometry on the GPU: the buffers, the views that describe them, and the parts to draw.
+// Fixed-size array so a mesh needs no allocation.
 struct mesh
 {
-    ID3D12Resource *VertexBuffer;       // both in a DEFAULT heap - VRAM
+    ID3D12Resource *VertexBuffers[2];       // DEFAULT heap (VRAM): fastest for the GPU to read
     ID3D12Resource *IndexBuffer;
-    D3D12_VERTEX_BUFFER_VIEW VertexView;    // made once: the buffers never move
+    D3D12_VERTEX_BUFFER_VIEW VertexViews[2];    // built once, since the buffers never move
     D3D12_INDEX_BUFFER_VIEW IndexView;
 
     u32 SubmeshCount;
     submesh Submeshes[MESH_MAX_SUBMESHES];
 };
 
-// Everything the renderer keeps from one frame to the next.  Add your
-// ID3D12Device *, swapchain, command queue and so on here.
+// All renderer state.  Lives in game memory so it survives game.dll hot reloads.
 struct dx12_renderer
 {
     b32 IsInitialized;
 
-    // The size the swapchain was last made for.  RendererRender compares
-    // this against the window's size each frame to spot a resize.
+    // Size the swap chain was last built for, to detect a resize.
     i32 Width;
     i32 Height;
 
-    // DXGI lists the GPUs and makes the swapchain - so the factory is kept,
-    // not thrown away after the device is made.
+    // Factory kept: it's needed again for the swap chain and tearing checks.
     IDXGIFactory6 *Factory;
-    IDXGIAdapter1 *Adapter;     // the GPU the device was made on
+    IDXGIAdapter1 *Adapter;     // the GPU the device runs on
     ID3D12Device *Device;
 
-    // What the GPU can do beyond the 12_0 minimum we ask for.  Device5 is
-    // the same device through a newer interface - the one with the ray
-    // tracing calls - and is only fetched when ray tracing is there to use.
+    // Optional GPU features, checked once so the game can still run without them.
+    // Device5 is the device's ray-tracing interface, fetched only if supported.
     D3D_FEATURE_LEVEL FeatureLevel;
     b32 SupportsRaytracing;
     b32 SupportsMeshShaders;
     ID3D12Device5 *Device5;
 
-    // The GPU's to-do list, and what the CPU records work into.  The CPU
-    // records commands into the list - their memory comes from the
-    // allocator - and hands the closed list to the queue.  The GPU works
-    // through the queue in its own time.
+    // CPU records commands into the list (memory from the allocator); the queue
+    // runs closed lists on the GPU.
     ID3D12CommandQueue *Queue;
     ID3D12CommandAllocator *CommandAllocator;
     ID3D12GraphicsCommandList *CommandList;
 
+    // Lets the CPU wait until the GPU reaches a point in the queue.
     ID3D12Fence *Fence;
-    u64 FenceValue;        // the last value we asked the queue to Signal
-    HANDLE FenceEvent;     // made once, reused by every wait
+    u64 FenceValue;        // last value the queue was told to signal
+    HANDLE FenceEvent;     // created once, reused for every wait
 
-    // The images that take turns on screen (Luna 4.1.4, 4.3.4).  Version 3
-    // for GetCurrentBackBufferIndex: with the flip model, the buffer to
-    // draw into is not always number 0 - ask every frame.
+    // Version 3 for GetCurrentBackBufferIndex: with flip-model the next buffer isn't always 0.
     IDXGISwapChain3 *SwapChain;
 
-    // Vsync off without tearing artefacts on G-Sync / FreeSync monitors,
-    // and the lowest input latency.  Present needs DXGI_PRESENT_ALLOW_TEARING
-    // to use it, and ResizeBuffers must be given the same flags as creation.
+    // Tearing support allows vsync-off on variable-refresh monitors.  The flags
+    // are stored because ResizeBuffers must get the same ones as creation.
     b32 SupportsTearing;
     UINT SwapChainFlags;
 
-    // The swap chain's buffers, and a render target view of each in RtvHeap
-    // slot i (Luna 4.3.6).  GetBuffer adds a reference, and ResizeBuffers
-    // fails while any is held - so these are released before every resize
-    // and fetched again after it.
+    // Swap chain images and their render target views (slot i = buffer i).
+    // Released before every resize, because ResizeBuffers fails while they're held.
     ID3D12Resource *BackBuffers[SWAP_CHAIN_BUFFER_COUNT];
     descriptor_heap RtvHeap;
 
-    // How far away the nearest surface drawn so far is, for every pixel -
-    // the same size as the back buffer, and ours, not the swap chain's, so
-    // RendererResize makes a new one.  Its one view is in DsvHeap slot 0.
+    // Per-pixel depth, so nearer surfaces hide farther ones.  Ours, not the
+    // swap chain's, so it's rebuilt on resize.  View in DsvHeap slot 0.
     ID3D12Resource *DepthBuffer;
     descriptor_heap DsvHeap;
 
-    // The shader-visible heap, and who has which slot.  Slots are handed
-    // out from NextUnused upwards; given-back ones go on the free list and
-    // are reused first.
+    // Shader-visible heap with a free list, so slots can be given back and reused.
     descriptor_heap SrvHeap;
     u32 SrvNextUnused;
     u32 SrvFreeCount;
     u32 SrvFreeList[SRV_HEAP_CAPACITY];
 
+    // DXC, loaded at runtime to compile HLSL at startup.
     HMODULE DxcModule;
-    IDxcUtils *DxcUtils;            // loads files
+    IDxcUtils *DxcUtils;            // loads shader files
     IDxcCompiler3 *DxcCompiler;     // compiles them
 
-    // Milestone 5: the cube.  Its vertices and indices live in VRAM; the
-    // constant buffer in an upload heap, mapped for good so the CPU can
-    // write the matrices every frame.
+    // The cube: how its shaders take input, all its pipeline settings, and its geometry.
     ID3D12RootSignature *CubeRootSignature;
     ID3D12PipelineState *CubePipeline;
     mesh CubeMesh;
 
+    // Upload-heap buffer for per-frame matrices, mapped permanently so the CPU
+    // can write it every frame without Map/Unmap.
     ID3D12Resource *ConstantBuffer;
-    u8 *ConstantBufferMapped;       // the CPU's pointer into it
+    u8 *ConstantBufferMapped;       // CPU pointer into it
 
-    // Dear ImGui's context - all of its state.  Made by game_imgui.cpp on
-    // the first frame after every load of game.dll, destroyed in GameUnload.
-    // 0 when it is not running.
+    // ImGui's state; 0 when not running.  Created after each game.dll load,
+    // destroyed in GameUnload.
     ImGuiContext *ImGui;
 
-    // Things the debug UI shows and edits.
+    // Values the debug UI shows and edits.
     r32 ClearColor[4];
     char GpuName[128];
-    u64 DedicatedVideoMemory;   // bytes of VRAM on the card
-    IDXGIAdapter3 *Adapter3;    // the same GPU, for QueryVideoMemoryInfo; may be 0
+    u64 DedicatedVideoMemory;   // VRAM on the card, in bytes
+    IDXGIAdapter3 *Adapter3;    // same GPU, for QueryVideoMemoryInfo; may be 0
 };
 
-// Every DirectX object is a COM object: Release it once, when done.  Zeroing
-// the pointer after means a second Release - or a use after it - is a clean
-// null crash in the debugger, not a mystery.
+// Releases a COM object and zeroes the pointer, so a second release or later
+// use is a clean null crash instead of a hidden bug.
 #define ReleaseAndZero(Pointer) do { if(Pointer) { (Pointer)->Release(); (Pointer) = 0; } } while(0)
 
+// Sends a line to the platform log; compiled out of release builds.
 internal void
 RendererLog(thread_context *Thread, game_memory *Memory, const char *Message)
 {
@@ -283,17 +239,9 @@ RendererLog(thread_context *Thread, game_memory *Memory, const char *Message)
 }
 
 /*
-  DX12_FAILED(Call) - Luna's ThrowIfFailed (4.6), without the exception.
-  Runs Call, and if its HRESULT is a failure, logs where and why:
-
-    ERROR: C:\clash\code\dx12_renderer.cpp(590): Renderer->Device->CreateFence(...)
-           failed with 0x80070057: The parameter is incorrect.
-
-  and is true - so it reads as "if this failed":
-    if(DX12_FAILED(Device->CreateFence(...))) { ...clean up...; return(false); }
-
-  A macro, not a function, for the same reasons as Luna's: __FILE__ and
-  __LINE__ must be the caller's, and #Call turns the call itself into text.
+  DX12_FAILED(Call): runs Call and returns true if its HRESULT failed, after
+  logging the file, line, call text and Windows' description of the error.
+  A macro so __FILE__, __LINE__ and #Call come from the caller.
   IMPORTANT(yigit): It logs through Thread and Memory - so it can only be
   used where variables of those names are in scope.
 */
@@ -304,7 +252,7 @@ DX12LogIfFailed(HRESULT Result, const char *Call, const char *File, int LineNumb
     b32 Failed = FAILED(Result);
     if(Failed)
     {
-        // Windows' own words for the error, minus the line break it ends with.
+        // Windows' text for the error code, cut at the line break it ends with.
         char Reason[256] = {};
         FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0,
                        (DWORD)Result, 0, Reason, sizeof(Reason), 0);
@@ -328,10 +276,13 @@ DX12LogIfFailed(HRESULT Result, const char *Call, const char *File, int LineNumb
 
 #define DX12_FAILED(Call) DX12LogIfFailed((Call), #Call, __FILE__, __LINE__, Thread, Memory)
 
-// RendererInitialize calls it to clean up when it fails halfway.
+// Declared early: RendererInitialize cleans up with RendererShutdown when it
+// fails, and CreateStaticBuffer waits with FlushCommandQueue.
 internal void RendererShutdown(dx12_renderer *Renderer);
 internal void FlushCommandQueue(dx12_renderer *Renderer);
 
+// Creates a descriptor heap and stores its start handles and slot size.
+// CBV/SRV/UAV and sampler heaps are made shader-visible, because only shaders read them.
 internal b32
 DescriptorHeapInit(descriptor_heap *Heap, ID3D12Device *Device,
                    D3D12_DESCRIPTOR_HEAP_TYPE Type, u32 Count,
@@ -345,7 +296,7 @@ DescriptorHeapInit(descriptor_heap *Heap, ID3D12Device *Device,
     Desc.Type = Type;
     Desc.Flags = ShaderVisible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
                                : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    Desc.NodeMask = 0;          // only for several GPUs linked together
+    Desc.NodeMask = 0;          // single GPU
     if(DX12_FAILED(Device->CreateDescriptorHeap(&Desc, IID_PPV_ARGS(&Heap->Heap))))
     {
         return(false);
@@ -354,6 +305,7 @@ DescriptorHeapInit(descriptor_heap *Heap, ID3D12Device *Device,
     Heap->CpuStart = Heap->Heap->GetCPUDescriptorHandleForHeapStart();
     if(ShaderVisible)
     {
+        // Only shader-visible heaps have a GPU address.
         Heap->GpuStart = Heap->Heap->GetGPUDescriptorHandleForHeapStart();
     }
     Heap->DescriptorSize = Device->GetDescriptorHandleIncrementSize(Type);
@@ -362,8 +314,7 @@ DescriptorHeapInit(descriptor_heap *Heap, ID3D12Device *Device,
     return(true);
 }
 
-// Where the CPU writes slot Index, and what commands like
-// ClearRenderTargetView take.
+// CPU handle of slot Index: used to write descriptors and by commands like ClearRenderTargetView.
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 DescriptorCpuHandle(descriptor_heap *Heap, u32 Index)
 {
@@ -373,7 +324,7 @@ DescriptorCpuHandle(descriptor_heap *Heap, u32 Index)
     return(Result);
 }
 
-// Where shaders find slot Index.  Shader-visible heaps only.
+// GPU handle of slot Index: what descriptor tables give shaders.  Shader-visible heaps only.
 inline D3D12_GPU_DESCRIPTOR_HANDLE
 DescriptorGpuHandle(descriptor_heap *Heap, u32 Index)
 {
@@ -384,8 +335,8 @@ DescriptorGpuHandle(descriptor_heap *Heap, u32 Index)
     return(Result);
 }
 
-// A free slot in the shader-visible heap: a given-back one if there is one,
-// else the next never-used one.  False when the heap is full.
+// Hands out a shader-visible heap slot, reusing freed ones first so the heap
+// doesn't run out.  False when full.
 internal b32
 SrvAllocate(dx12_renderer *Renderer, u32 *Index)
 {
@@ -405,6 +356,7 @@ SrvAllocate(dx12_renderer *Renderer, u32 *Index)
     return(Result);
 }
 
+// Gives a slot back to the free list for SrvAllocate to reuse.
 internal void
 SrvRelease(dx12_renderer *Renderer, u32 Index)
 {
@@ -413,8 +365,8 @@ SrvRelease(dx12_renderer *Renderer, u32 Index)
     Renderer->SrvFreeList[Renderer->SrvFreeCount++] = Index;
 }
 
-// Takes the swap chain's buffers and writes a render target view of each
-// into the RTV heap.  After creation, and after every ResizeBuffers.
+// Gets the swap chain's buffers and writes a render target view for each, so
+// they can be cleared and drawn into.  Called at startup and after every resize.
 internal b32
 AcquireBackBuffers(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
 {
@@ -426,8 +378,7 @@ AcquireBackBuffers(dx12_renderer *Renderer, thread_context *Thread, game_memory 
             return(false);
         }
 
-        // 0 for the view's description: view it exactly as it was made -
-        // the swap chain's format, mip level 0.
+        // No view description (0): view the buffer in its own format, mip 0.
         Renderer->Device->CreateRenderTargetView(Renderer->BackBuffers[BufferIndex], 0,
                                                  DescriptorCpuHandle(&Renderer->RtvHeap, BufferIndex));
     }
@@ -435,8 +386,8 @@ AcquireBackBuffers(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     return(true);
 }
 
-// Gives back the references GetBuffer took.  The RTVs are left in the heap -
-// they are just data, and AcquireBackBuffers overwrites them.
+// Drops our references to the swap chain buffers so ResizeBuffers can succeed.
+// The views stay; AcquireBackBuffers overwrites them.
 internal void
 ReleaseBackBuffers(dx12_renderer *Renderer)
 {
@@ -446,39 +397,38 @@ ReleaseBackBuffers(dx12_renderer *Renderer)
     }
 }
 
-// Makes the depth buffer at this size, and writes its view into DsvHeap
-// slot 0.  At startup, and after every resize.
+// Creates a depth buffer of this size and its view in DsvHeap slot 0.
+// Called at startup and on resize, since it must match the back buffer's size.
 internal b32
 CreateDepthBuffer(dx12_renderer *Renderer, i32 Width, i32 Height,
                   thread_context *Thread, game_memory *Memory)
 {
-    // DEFAULT: in VRAM, where only the GPU reads and writes it.
+    // DEFAULT heap (VRAM): only the GPU touches it.
     D3D12_HEAP_PROPERTIES HeapProperties = {};
     HeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
 
     D3D12_RESOURCE_DESC Desc = {};
     Desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    Desc.Alignment = 0;                     // the default, 64 KB
+    Desc.Alignment = 0;                     // default 64 KB
     Desc.Width = (UINT64)Width;             // must match the render target
     Desc.Height = (UINT)Height;
     Desc.DepthOrArraySize = 1;
     Desc.MipLevels = 1;
     Desc.Format = DEPTH_FORMAT;
-    Desc.SampleDesc.Count = 1;              // must match the render target too
+    Desc.SampleDesc.Count = 1;              // must match the render target
     Desc.SampleDesc.Quality = 0;
-    Desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;  // the GPU's own tiled layout
+    Desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;  // let the GPU pick its fastest layout
     Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
-    // A clear with exactly these values can be faster - and the per-frame
-    // clear uses the same two values, or the debug layer warns.
+    // Clearing to these exact values is faster; the per-frame clear uses the
+    // same ones, or the debug layer warns.
     D3D12_CLEAR_VALUE OptimizedClear = {};
     OptimizedClear.Format = DEPTH_FORMAT;
     OptimizedClear.DepthStencil.Depth = DEPTH_CLEAR_VALUE;
     OptimizedClear.DepthStencil.Stencil = STENCIL_CLEAR_VALUE;
 
-    // "Committed": the memory and the resource made together, in one call.
-    // Made straight into DEPTH_WRITE - unlike Luna's COMMON-then-barrier -
-    // since depth and stencil testing is all it is ever used for.
+    // Committed: memory and resource created together.  Starts in DEPTH_WRITE,
+    // its only use, so no barrier is ever needed.
     if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&HeapProperties, D3D12_HEAP_FLAG_NONE,
                                                              &Desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                                                              &OptimizedClear,
@@ -487,14 +437,15 @@ CreateDepthBuffer(dx12_renderer *Renderer, i32 Width, i32 Height,
         return(false);
     }
 
-    // 0 for the view's description: the format it was made with, mip 0.
+    // No view description (0): the resource's own format, mip 0.
     Renderer->Device->CreateDepthStencilView(Renderer->DepthBuffer, 0,
                                              DescriptorCpuHandle(&Renderer->DsvHeap, 0));
 
     return(true);
 }
 
-// A barrier that moves a whole resource from one state to another.
+// Builds a barrier moving a whole resource from one state to another, so the
+// GPU can finish, flush or re-layout it before the next use.
 inline D3D12_RESOURCE_BARRIER
 TransitionBarrier(ID3D12Resource *Resource, D3D12_RESOURCE_STATES Before,
                   D3D12_RESOURCE_STATES After)
@@ -509,9 +460,8 @@ TransitionBarrier(ID3D12Resource *Resource, D3D12_RESOURCE_STATES Before,
     return(Result);
 }
 
-// Loads dxcompiler.dll and makes the two DXC objects clash uses.  LoadLibrary
-// rather than linking: the DLL's reference count is then ours, so it stays
-// loaded across hot reloads of game.dll.
+// Loads dxcompiler.dll and creates the DXC utils and compiler.  LoadLibrary
+// instead of linking keeps the DLL loaded across game.dll hot reloads.
 internal b32
 LoadShaderCompiler(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
 {
@@ -522,7 +472,7 @@ LoadShaderCompiler(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
-    // The one function the DLL exports.  Everything else comes from it.
+    // The DLL's only export; every DXC object is created through it.
     DxcCreateInstanceProc CreateInstance =
         (DxcCreateInstanceProc)(void *)GetProcAddress(Renderer->DxcModule, "DxcCreateInstance");
     if(!CreateInstance)
@@ -540,10 +490,9 @@ LoadShaderCompiler(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     return(true);
 }
 
-// Compiles one shader from an .hlsl file (Luna 6.7).  EntryPoint is the
-// function's name ("VS"); Target is the kind of shader and the shader model
-// ("vs_6_6").  Returns the compiled DXIL, which the caller must Release - or
-// 0, with the compiler's own messages in the log.
+// Compiles one entry point (e.g. "VS") of an .hlsl file for a target (e.g.
+// "vs_6_6").  Returns the bytecode for the caller to Release, or 0 with the
+// compiler's errors logged.
 internal IDxcBlob *
 CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
               LPCWSTR FileName, LPCWSTR EntryPoint, LPCWSTR Target)
@@ -559,19 +508,18 @@ CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memo
     DxcBuffer SourceBuffer;
     SourceBuffer.Ptr = Source->GetBufferPointer();
     SourceBuffer.Size = Source->GetBufferSize();
-    SourceBuffer.Encoding = DXC_CP_ACP;     // let DXC work it out
+    SourceBuffer.Encoding = DXC_CP_ACP;     // let DXC detect the text encoding
 
-    // The same switches dxc.exe takes on its command line.  The file name
-    // first, so error messages can say which file they are about.
+    // dxc.exe command-line switches.  File name first so errors name the file.
     LPCWSTR Arguments[] =
     {
         FileName,
         L"-E", EntryPoint,
         L"-T", Target,
 #if CLASH_DEBUG
-        DXC_ARG_DEBUG,                  // -Zi: debug information, for PIX
+        DXC_ARG_DEBUG,                  // -Zi: debug info, for PIX
         DXC_ARG_SKIP_OPTIMIZATIONS,     // -Od: so PIX can step line by line
-        L"-Qembed_debug",               // keep that information inside the shader
+        L"-Qembed_debug",               // store the debug info inside the shader
 #endif
     };
 
@@ -579,7 +527,7 @@ CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memo
     if(!DX12_FAILED(Renderer->DxcCompiler->Compile(&SourceBuffer, Arguments, (UINT32)ArrayCount(Arguments),
                                                    0, IID_PPV_ARGS(&Compiled))))
     {
-        // Errors and warnings, as text, exactly as dxc.exe prints them.
+        // Log errors and warnings as dxc.exe would print them.
         IDxcBlobUtf8 *Errors = 0;
         Compiled->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&Errors), 0);
         if(Errors && Errors->GetStringLength())
@@ -588,8 +536,7 @@ CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memo
         }
         ReleaseAndZero(Errors);
 
-        // Compile itself succeeds even when the SHADER does not - the status
-        // says which.
+        // Compile() succeeds even when the shader has errors; the status tells which.
         HRESULT Status = E_FAIL;
         Compiled->GetStatus(&Status);
         if(SUCCEEDED(Status))
@@ -610,7 +557,7 @@ CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memo
     return(Result);
 }
 
-// The description of a heap of this type - all its other fields stay 0.
+// Heap properties for a heap type; every other field stays at its 0 default.
 inline D3D12_HEAP_PROPERTIES
 DescribeHeap(D3D12_HEAP_TYPE Type)
 {
@@ -619,8 +566,7 @@ DescribeHeap(D3D12_HEAP_TYPE Type)
     return(Result);
 }
 
-// The description of a buffer of Size bytes.  Every buffer's is the same but
-// for the size (Luna 6.2's CD3DX12_RESOURCE_DESC::Buffer).
+// Resource description for a buffer of Size bytes; all buffers differ only in size.
 inline D3D12_RESOURCE_DESC
 DescribeBuffer(u64 Size)
 {
@@ -637,16 +583,13 @@ DescribeBuffer(u64 Size)
 }
 
 /*
-  A buffer in a DEFAULT heap - VRAM, the fastest memory for the GPU to read -
-  with Data copied into it (Luna 6.2's CreateStaticBuffer).  The CPU cannot
-  write to VRAM, so: put the data in a temporary UPLOAD buffer, have the GPU
-  copy it across, wait for the copy, and throw the upload buffer away.
-  Startup only - it waits for the GPU.
+  Creates a VRAM (DEFAULT heap) buffer holding Data, because VRAM is fastest
+  for the GPU to read.  The CPU can't write VRAM, so the data goes into a
+  temporary UPLOAD buffer and the GPU copies it across.  Waits for the copy,
+  so it's for startup only.
 
-  No barriers, unlike Luna's version: a BUFFER starts in COMMON and moves on
-  its own - to COPY_DEST for the copy, to vertex or index buffer when it is
-  drawn - and drops back to COMMON after each ExecuteCommandLists.  Textures
-  will not be so easy (milestone 6).
+  No barriers: buffers change state automatically for the copy and for
+  drawing, and return to COMMON after each ExecuteCommandLists.
 */
 internal b32
 CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
@@ -654,7 +597,7 @@ CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory 
 {
     D3D12_RESOURCE_DESC Desc = DescribeBuffer(Size);
 
-    // 1. The buffer itself, in VRAM.
+    // The final buffer, in VRAM.
     D3D12_HEAP_PROPERTIES DefaultHeap = DescribeHeap(D3D12_HEAP_TYPE_DEFAULT);
     if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&DefaultHeap, D3D12_HEAP_FLAG_NONE, &Desc,
                                                              D3D12_RESOURCE_STATE_COMMON, 0,
@@ -663,7 +606,7 @@ CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
-    // 2. A temporary buffer the CPU can write, with the data put in it.
+    // A temporary buffer the CPU can write.
     ID3D12Resource *Upload = 0;
     D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
     if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &Desc,
@@ -673,6 +616,7 @@ CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
+    // Copy the data in.  Empty read range: the CPU never reads it back.
     void *Mapped = 0;
     D3D12_RANGE NoRead = {0, 0};
     if(DX12_FAILED(Upload->Map(0, &NoRead, &Mapped)))
@@ -683,8 +627,7 @@ CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     memcpy(Mapped, Data, Size);
     Upload->Unmap(0, 0);
 
-    // 3. The GPU copies it across.  The command list is closed between
-    //    frames, so: open it, record the copy, close it, run it, wait.
+    // Record and run a GPU copy into VRAM, then wait so the upload buffer can be freed.
     b32 Copied = false;
     if(!DX12_FAILED(Renderer->CommandAllocator->Reset()) &&
        !DX12_FAILED(Renderer->CommandList->Reset(Renderer->CommandAllocator, 0)))
@@ -699,19 +642,19 @@ CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         }
     }
 
-    // The copy is finished, so the upload buffer can go.
     Upload->Release();
     return(Copied);
 }
 
+// Builds everything needed to draw the cube: root signature, shaders, pipeline
+// state, geometry in VRAM, and the constant buffer for its matrices.
 internal b32
 CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
 {
     // ------------------------------------------------------------------
-    // 1. The root signature - NEW: two parameters, the shaders' b0 and b1.
-    //    Each is a "root CBV": just the GPU address of the constant data,
-    //    with no descriptor and no heap in between.  (Luna uses descriptor
-    //    tables here, and root CBVs from 7.4.3.)
+    // 1. Root signature: tells the pipeline the shaders take two constant
+    //    buffers, b0 and b1, each passed as a plain GPU address (root CBV)
+    //    so no descriptor heap is needed.
     // ------------------------------------------------------------------
     D3D12_ROOT_PARAMETER Parameters[2] = {};
     Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -723,6 +666,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     Parameters[1].Descriptor.RegisterSpace = 0;
     Parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
+    // ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT: we feed vertices through an input layout.
     D3D12_ROOT_SIGNATURE_DESC RootDesc = {};
     RootDesc.NumParameters = (UINT)ArrayCount(Parameters);
     RootDesc.pParameters = Parameters;
@@ -730,6 +674,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     RootDesc.pStaticSamplers = 0;
     RootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
+    // Serialize to bytes first (CreateRootSignature only takes bytes), logging any errors.
     ID3DBlob *Serialized = 0;
     ID3DBlob *SerializeErrors = 0;
     HRESULT SerializeResult = D3D12SerializeRootSignature(&RootDesc, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -756,7 +701,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     }
 
     // ------------------------------------------------------------------
-    // 2. The shaders - cube.hlsl now.
+    // 2. Compile cube.hlsl's vertex and pixel shaders.
     // ------------------------------------------------------------------
     IDxcBlob *VertexShader = CompileShader(Renderer, Thread, Memory,
                                            L"data\\shaders\\cube.hlsl", L"VS", L"vs_6_6");
@@ -770,19 +715,22 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     }
 
     // ------------------------------------------------------------------
-    // 3. The input layout - the same color_vertex as the triangle.
+    // 3. Input layout: tells the GPU how to turn buffer bytes into the vertex
+    //    shader's inputs - POSITION from slot 0, COLOR from slot 1, each at
+    //    offset 0 because each buffer holds only one attribute.
     // ------------------------------------------------------------------
-    D3D12_INPUT_ELEMENT_DESC InputLayout[] =
+
+    D3D12_INPUT_ELEMENT_DESC vertexDesc[] =
     {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, (UINT)offsetof(color_vertex, Position),
-         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, (UINT)offsetof(color_vertex, Color),
-         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
+            D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0,
+            D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}
     };
 
     // ------------------------------------------------------------------
-    // 4. The pipeline state object - exactly the triangle's settings, with
-    //    the cube's root signature.
+    // 4. Pipeline state object: all draw settings baked into one object, so
+    //    the driver validates and compiles them once instead of per draw.
     // ------------------------------------------------------------------
     D3D12_GRAPHICS_PIPELINE_STATE_DESC PipelineDesc = {};
     PipelineDesc.pRootSignature = Renderer->CubeRootSignature;
@@ -791,6 +739,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     PipelineDesc.PS.pShaderBytecode = PixelShader->GetBufferPointer();
     PipelineDesc.PS.BytecodeLength = PixelShader->GetBufferSize();
 
+    // Blending off: the pixel shader's colour replaces what's there.
     D3D12_RENDER_TARGET_BLEND_DESC *Blend = &PipelineDesc.BlendState.RenderTarget[0];
     Blend->BlendEnable = FALSE;
     Blend->LogicOpEnable = FALSE;
@@ -804,6 +753,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     Blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     PipelineDesc.SampleMask = 0xFFFFFFFF;
 
+    // Filled triangles; back faces (counter-clockwise on screen) skipped, since they're hidden.
     PipelineDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     PipelineDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     PipelineDesc.RasterizerState.FrontCounterClockwise = FALSE;
@@ -812,6 +762,8 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     PipelineDesc.RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
     PipelineDesc.RasterizerState.DepthClipEnable = TRUE;
 
+    // Depth test on: a pixel is kept only if it's nearer (LESS) than what's
+    // already there, and its depth is written.  Stencil unused.
     D3D12_DEPTH_STENCIL_DESC *DepthStencil = &PipelineDesc.DepthStencilState;
     DepthStencil->DepthEnable = TRUE;
     DepthStencil->DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -824,8 +776,10 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     DepthStencil->FrontFace = KeepAlways;
     DepthStencil->BackFace = KeepAlways;
 
-    PipelineDesc.InputLayout.pInputElementDescs = InputLayout;
-    PipelineDesc.InputLayout.NumElements = (UINT)ArrayCount(InputLayout);
+    // Triangles drawn into one back buffer plus the depth buffer, no MSAA;
+    // formats must match the real targets.
+    PipelineDesc.InputLayout.pInputElementDescs = vertexDesc;
+    PipelineDesc.InputLayout.NumElements = (UINT)ArrayCount(vertexDesc);
     PipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     PipelineDesc.NumRenderTargets = 1;
     PipelineDesc.RTVFormats[0] = SWAP_CHAIN_FORMAT;
@@ -833,6 +787,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     PipelineDesc.SampleDesc.Count = 1;
     PipelineDesc.SampleDesc.Quality = 0;
 
+    // The PSO keeps its own copy of the shaders, so the blobs can be released.
     b32 NoPipeline =
         DX12_FAILED(Renderer->Device->CreateGraphicsPipelineState(&PipelineDesc,
                                                                   IID_PPV_ARGS(&Renderer->CubePipeline)));
@@ -844,28 +799,38 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     }
 
     // ------------------------------------------------------------------
-    // 5. NEW: the 8 corners of a 2x2x2 cube around the origin, each its
-    //    own colour (Luna's).  Real positions now, in the cube's own
-    //    "local" space - the World matrix moves them every frame.
+    // 5. The cube's 8 corners in its local space (the World matrix moves
+    //    them), split into two arrays for the two vertex buffers.  Same
+    //    order in both: vertex i is Positions[i] with Colors[i].
     // ------------------------------------------------------------------
-    color_vertex Vertices[] =
+    VPosData Positions[] =
     {
-        {{-1.0f, -1.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},     // 0: white
-        {{-1.0f, +1.0f, -1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},     // 1: black
-        {{+1.0f, +1.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},     // 2: red
-        {{+1.0f, -1.0f, -1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},     // 3: green
-        {{-1.0f, -1.0f, +1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},     // 4: blue
-        {{-1.0f, +1.0f, +1.0f}, {1.0f, 1.0f, 0.0f, 1.0f}},     // 5: yellow
-        {{+1.0f, +1.0f, +1.0f}, {0.0f, 1.0f, 1.0f, 1.0f}},     // 6: cyan
-        {{+1.0f, -1.0f, +1.0f}, {1.0f, 0.0f, 1.0f, 1.0f}},     // 7: magenta
+        {{-1.0f, -1.0f, -1.0f}},    // 0
+        {{-1.0f, +1.0f, -1.0f}},    // 1
+        {{+1.0f, +1.0f, -1.0f}},    // 2
+        {{+1.0f, -1.0f, -1.0f}},    // 3
+        {{-1.0f, -1.0f, +1.0f}},    // 4
+        {{-1.0f, +1.0f, +1.0f}},    // 5
+        {{+1.0f, +1.0f, +1.0f}},    // 6
+        {{+1.0f, -1.0f, +1.0f}},    // 7
+    };
+
+    VColorData Colors[] =
+    {
+        {{1.0f, 1.0f, 1.0f, 1.0f}},     // 0: white
+        {{0.0f, 0.0f, 0.0f, 1.0f}},     // 1: black
+        {{1.0f, 0.0f, 0.0f, 1.0f}},     // 2: red
+        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 3: green
+        {{0.0f, 0.0f, 1.0f, 1.0f}},     // 4: blue
+        {{1.0f, 1.0f, 0.0f, 1.0f}},     // 5: yellow
+        {{0.0f, 1.0f, 1.0f, 1.0f}},     // 6: cyan
+        {{1.0f, 0.0f, 1.0f, 1.0f}},     // 7: magenta
     };
 
     // ------------------------------------------------------------------
-    // 6. NEW: the index buffer (Luna 6.3).  2 triangles per face, 6 faces,
-    //    36 indices into the 8 corners - each corner is shared by several
-    //    triangles instead of being repeated.  Every triangle is clockwise
-    //    seen from OUTSIDE the cube, so the faces turned away get culled.
-    //    16-bit indices: plenty for 8 vertices, and half the memory.
+    // 6. Indices: 12 triangles from the 8 shared corners, so no corner is
+    //    stored twice.  Clockwise seen from outside, so back faces cull.
+    //    16-bit: enough for 8 vertices, half the memory of 32-bit.
     // ------------------------------------------------------------------
     u16 Indices[] =
     {
@@ -877,35 +842,41 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
         4, 0, 3,   4, 3, 7,     // bottom (y = -1)
     };
 
+    // Upload positions, colours and indices to VRAM.
     mesh *Mesh = &Renderer->CubeMesh;
-    if(!CreateStaticBuffer(Renderer, Thread, Memory, Vertices, sizeof(Vertices), &Mesh->VertexBuffer) ||
-       !CreateStaticBuffer(Renderer, Thread, Memory, Indices, sizeof(Indices), &Mesh->IndexBuffer))
+    if(!CreateStaticBuffer(Renderer, Thread, Memory, Positions, sizeof(Positions), &Mesh->VertexBuffers[0]) ||
+            !CreateStaticBuffer(Renderer, Thread, Memory, Colors, sizeof(Colors), &Mesh->VertexBuffers[1]) ||
+            !CreateStaticBuffer(Renderer, Thread, Memory, Indices, sizeof(Indices), &Mesh->IndexBuffer))
     {
         return(false);
     }
 
-    Mesh->VertexView.BufferLocation = Mesh->VertexBuffer->GetGPUVirtualAddress();
-    Mesh->VertexView.SizeInBytes = (UINT)sizeof(Vertices);
-    Mesh->VertexView.StrideInBytes = (UINT)sizeof(color_vertex);
+    // Vertex views: address, total size, and stride (bytes per vertex) of each buffer.
+    // Slot 0: positions, 12 bytes each.
+    Mesh->VertexViews[0].BufferLocation = Mesh->VertexBuffers[0]->GetGPUVirtualAddress();
+    Mesh->VertexViews[0].SizeInBytes = (UINT)sizeof(Positions);
+    Mesh->VertexViews[0].StrideInBytes = (UINT)sizeof(VPosData);
 
-    // The index buffer's view: where, how many bytes, and how big each index is.
+    // Slot 1: colours, 16 bytes each.
+    Mesh->VertexViews[1].BufferLocation = Mesh->VertexBuffers[1]->GetGPUVirtualAddress();
+    Mesh->VertexViews[1].SizeInBytes = (UINT)sizeof(Colors);
+    Mesh->VertexViews[1].StrideInBytes = (UINT)sizeof(VColorData);
+
+    // Index view: address, size, and 16-bit format to match the u16 array.
     Mesh->IndexView.BufferLocation = Mesh->IndexBuffer->GetGPUVirtualAddress();
     Mesh->IndexView.SizeInBytes = (UINT)sizeof(Indices);
     Mesh->IndexView.Format = DXGI_FORMAT_R16_UINT;
 
-    // One submesh: the whole buffer pair.  A second shape packed in after
-    // it would start at index 36 and vertex 8.
+    // One submesh covering all 36 indices.
     Mesh->SubmeshCount = 1;
     Mesh->Submeshes[0].IndexCount = (u32)ArrayCount(Indices);
     Mesh->Submeshes[0].StartIndex = 0;
     Mesh->Submeshes[0].BaseVertex = 0;
 
     // ------------------------------------------------------------------
-    // 7. NEW: the constant buffer (Luna 6.6.1) - two 256-byte slots, slot
-    //    0 for ObjectConstants and slot 1 for PassConstants.  An UPLOAD
-    //    heap, because the CPU rewrites it every frame, and mapped once,
-    //    here, for good: an upload heap may stay mapped while the GPU uses
-    //    it.
+    // 7. Constant buffer: two 256-byte slots (World, ViewProj) in an UPLOAD
+    //    heap because the CPU rewrites them every frame.  Mapped once and
+    //    left mapped, which upload heaps allow.
     // ------------------------------------------------------------------
     D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
     D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer(2*CONSTANT_BUFFER_SLOT_SIZE);
@@ -916,6 +887,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
         return(false);
     }
 
+    // Empty read range: the CPU only writes.
     D3D12_RANGE NoRead = {0, 0};
     if(DX12_FAILED(Renderer->ConstantBuffer->Map(0, &NoRead, (void **)&Renderer->ConstantBufferMapped)))
     {
@@ -925,8 +897,8 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     return(true);
 }
 
-// Window is the HWND the swapchain draws into.  Returns false if DirectX 12
-// could not be started.
+// Starts DirectX 12 on the given window: device, queue, swap chain, heaps,
+// depth buffer, then the cube.  False if DirectX 12 can't start.
 internal b32
 RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
                    HWND Window, i32 Width, i32 Height)
@@ -935,9 +907,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     Renderer->Height = Height;
 
     // ------------------------------------------------------------------
-    // The debug layer.  D3D12 checks every call and prints what is wrong
-    // to the debugger's Output window.  It has to be switched on BEFORE
-    // the device is made - a device made earlier never gets it.
+    // Debug layer: validates every D3D12 call and reports mistakes.  Must be
+    // enabled before the device is created, or that device won't have it.
     // ------------------------------------------------------------------
     UINT FactoryFlags = 0;
 #if CLASH_DEBUG
@@ -946,9 +917,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     {
         Debug->EnableDebugLayer();
 
-        // Even stricter: checks on the GPU itself, as the shaders run.
-        // Catches far more, but makes everything much slower - switch it
-        // on when hunting a bug the normal layer does not see.
+        // GPU-based validation: checks shaders as they run.  Much slower, so
+        // left off; uncomment to hunt bugs the normal layer misses.
         // ID3D12Debug1 *Debug1 = 0;
         // if(SUCCEEDED(Debug->QueryInterface(IID_PPV_ARGS(&Debug1))))
         // {
@@ -959,8 +929,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         Debug->Release();
     }
 
-    // DXGI's own errors - swapchain mistakes, mostly - to the Output window
-    // as well.
+    // Also report DXGI (swap chain) errors.
     FactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
 #endif
 
@@ -970,15 +939,9 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     }
 
     // ------------------------------------------------------------------
-    // The device, on the fastest GPU that can run DirectX 12.
-    //
-    // EnumAdapterByGpuPreference lists the high-performance GPU first -
-    // the discrete one on a laptop.  Plain EnumAdapters lists the GPU the
-    // monitor is plugged into first, which is often the integrated one.
-    //
-    // 12_0 is the minimum: any DirectX 12 GPU from the last ten years.
-    // Ray tracing and mesh shaders are checked for separately below, so
-    // the game still starts on a GPU without them.
+    // Device: try GPUs fastest-first (so laptops use the discrete GPU) and
+    // take the first that supports feature level 12_0.  Extras like ray
+    // tracing are checked separately so older GPUs still work.
     // ------------------------------------------------------------------
     for(UINT AdapterIndex = 0;; ++AdapterIndex)
     {
@@ -987,15 +950,14 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
                                                                 DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
                                                                 IID_PPV_ARGS(&Adapter))))
         {
-            // DXGI_ERROR_NOT_FOUND: no more GPUs to try.
+            // No more GPUs to try.
             break;
         }
 
         DXGI_ADAPTER_DESC1 Desc;
         Adapter->GetDesc1(&Desc);
 
-        // The "Microsoft Basic Render Driver" - DirectX 12 on the CPU.
-        // Far too slow to play on; skipped.
+        // Skip the software (CPU) renderer: far too slow to play on.
         b32 IsSoftware = (Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
 
         if(!IsSoftware &&
@@ -1017,9 +979,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     }
 
 #if CLASH_DEBUG
-    // Stop in the debugger ON the call that is wrong, instead of finding
-    // the message in the Output window later.  Only with a debugger
-    // attached - without one, the break would just crash the game.
+    // With a debugger attached, break on the exact call that causes a D3D12
+    // error, instead of finding the message later.  Without one, a break would crash.
     if(IsDebuggerPresent())
     {
         ID3D12InfoQueue *InfoQueue = 0;
@@ -1033,7 +994,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
 #endif
 
     // ------------------------------------------------------------------
-    // What this GPU can do.
+    // Query the highest feature level and optional features, so later code
+    // can use them only where available.
     // ------------------------------------------------------------------
     D3D_FEATURE_LEVEL LevelsToCheck[] =
     {
@@ -1070,7 +1032,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         Renderer->Device->QueryInterface(IID_PPV_ARGS(&Renderer->Device5));
     }
 
-    // Which GPU we got - milestone 1's proof that it worked.
+    // Log the GPU and its features, to confirm which GPU is in use.
     DXGI_ADAPTER_DESC1 Desc;
     Renderer->Adapter->GetDesc1(&Desc);
 
@@ -1084,18 +1046,16 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
              Renderer->SupportsMeshShaders ? "yes" : "no");
     RendererLog(Thread, Memory, Line);
 
-    // Kept for the debug UI.
+    // Stored for the debug UI.
     snprintf(Renderer->GpuName, sizeof(Renderer->GpuName), "%ls", Desc.Description);
     Renderer->DedicatedVideoMemory = (u64)Desc.DedicatedVideoMemory;
 
-    // Version 3 of the adapter has QueryVideoMemoryInfo, for the debug UI's
-    // VRAM read-out.  Optional - without it there is just no read-out.
+    // Adapter3 has QueryVideoMemoryInfo for the debug UI's VRAM display.
+    // Optional: without it the display is just missing.
     Renderer->Adapter->QueryInterface(IID_PPV_ARGS(&Renderer->Adapter3));
 
-    // The Agility SDK (see the top of win32_clash.cpp).  The exe's export
-    // says which runtime version to load; these headers were written for
-    // D3D12_SDK_VERSION.  If the two disagree after an SDK upgrade, D3D12
-    // quietly falls back to the runtime built into Windows.
+    // Warn if clash.exe's Agility SDK version doesn't match these headers,
+    // because D3D12 then silently falls back to Windows' older runtime.
     u32 *ExeSDKVersion = (u32 *)(void *)GetProcAddress(GetModuleHandleA(0), "D3D12SDKVersion");
     if(!ExeSDKVersion)
     {
@@ -1110,8 +1070,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         RendererLog(Thread, Memory, Line);
     }
 
-    // Which D3D12Core.dll is really running: build\D3D12\ means the Agility
-    // SDK's, C:\Windows\System32 means the one built into Windows.
+    // Log which D3D12Core.dll loaded: build\D3D12\ is the Agility SDK, System32 is Windows' own.
     char CorePath[MAX_PATH] = {};
     HMODULE Core = GetModuleHandleA("D3D12Core.dll");
     if(Core)
@@ -1121,6 +1080,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     snprintf(Line, sizeof(Line), "D3D12 runtime: %s\n", Core ? CorePath : "D3D12Core.dll not loaded");
     RendererLog(Thread, Memory, Line);
 
+    // Fence and event, so the CPU can wait for the GPU (FlushCommandQueue).
     if(DX12_FAILED(Renderer->Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                     IID_PPV_ARGS(&Renderer->Fence))))
     {
@@ -1136,12 +1096,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     }
 
     // ------------------------------------------------------------------
-    // Command queue, allocator and list (Luna 4.3.3).
-    //
-    // DIRECT is the queue type that can draw; it takes copy and compute
-    // work too.  Later, a separate COPY queue can stream assets and a
-    // COMPUTE queue can run work alongside drawing ("async compute") -
-    // one DIRECT queue is all we need now.
+    // Command queue, allocator and list.  One DIRECT queue, the type that can
+    // draw, copy and compute - enough until async copy/compute is needed.
     // ------------------------------------------------------------------
     D3D12_COMMAND_QUEUE_DESC QueueDesc = {};
     QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1152,8 +1108,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
-    // The memory recorded commands live in.  It must not be Reset until
-    // the GPU has finished every command in it - FlushCommandQueue first.
+    // Memory for recorded commands.  Only Reset it once the GPU has finished them.
     if(DX12_FAILED(Renderer->Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                             IID_PPV_ARGS(&Renderer->CommandAllocator))))
     {
@@ -1161,8 +1116,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
-    // 0: the first (only) GPU.  No pipeline state yet - nothing is drawn
-    // with one until milestone 4, and it can be set while recording.
+    // Node 0 (single GPU), no initial PSO (set while recording instead).
     if(DX12_FAILED(Renderer->Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                        Renderer->CommandAllocator, 0,
                                                        IID_PPV_ARGS(&Renderer->CommandList))))
@@ -1171,13 +1125,13 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
-    // A new list starts open, ready to record.  Every frame begins with
-    // Reset, and Reset needs a closed list - so close it now.
+    // New lists start open; close it because each frame starts with Reset, which needs a closed list.
     Renderer->CommandList->Close();
 
     // ------------------------------------------------------------------
-    // The swap chain (Luna 4.3.4).
+    // Swap chain: the images shown on screen in turn.
     // ------------------------------------------------------------------
+    // Enable tearing if supported, for vsync-off on variable-refresh monitors.
     BOOL AllowTearing = FALSE;
     if(SUCCEEDED(Renderer->Factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
                                                         &AllowTearing, sizeof(AllowTearing))))
@@ -1190,34 +1144,30 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     SwapDesc.Width = (UINT)Width;
     SwapDesc.Height = (UINT)Height;
 
-    // 8 bits each of red, green, blue, alpha; UNORM reads 0-255 as 0-1.
-    // Flip-model swap chains cannot be _SRGB - for sRGB later, make the
-    // render target VIEW R8G8B8A8_UNORM_SRGB instead.
+    // Not _SRGB: flip-model swap chains don't allow it; for sRGB, use an _SRGB render target view.
     SwapDesc.Format = SWAP_CHAIN_FORMAT;
     SwapDesc.Stereo = FALSE;
 
-    // No MSAA: flip-model swap chains cannot be multisampled.
+    // No MSAA: flip-model swap chains can't be multisampled.
     SwapDesc.SampleDesc.Count = 1;
     SwapDesc.SampleDesc.Quality = 0;
 
     SwapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     SwapDesc.BufferCount = SWAP_CHAIN_BUFFER_COUNT;
 
-    // A window that is not the buffer's size shows it unstretched.
+    // Don't stretch the image if the window size differs.
     SwapDesc.Scaling = DXGI_SCALING_NONE;
 
-    // The flip model - required in D3D12.  DISCARD: the back buffer's old
-    // contents are gone after Present, so every frame is drawn in full.
+    // Flip model, required by D3D12.  DISCARD: old contents are dropped, since
+    // every frame is redrawn fully.
     SwapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     SwapDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
 
-    // No ALLOW_MODE_SWITCH, unlike Luna: the platform does borderless
-    // fullscreen on F11 and never changes the monitor's resolution.
+    // No ALLOW_MODE_SWITCH: fullscreen is borderless (F11), never a resolution change.
     SwapDesc.Flags = Renderer->SwapChainFlags;
 
-    // The QUEUE, not the device: in D3D12, Present goes through the queue,
-    // after the work submitted before it.  The two zeros: no fullscreen
-    // settings (windowed), and any monitor may show it.
+    // Created on the queue, because Present is queued after the frame's work.
+    // Zeros: windowed, any monitor.
     IDXGISwapChain1 *SwapChain1 = 0;
     if(DX12_FAILED(Renderer->Factory->CreateSwapChainForHwnd(Renderer->Queue, Window, &SwapDesc,
                                                              0, 0, &SwapChain1)))
@@ -1226,7 +1176,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
-    // Up to version 3, for GetCurrentBackBufferIndex.
+    // Upgrade to version 3 for GetCurrentBackBufferIndex.
     b32 NoSwapChain3 = DX12_FAILED(SwapChain1->QueryInterface(IID_PPV_ARGS(&Renderer->SwapChain)));
     SwapChain1->Release();
     if(NoSwapChain3)
@@ -1235,13 +1185,11 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
-    // Left alone, DXGI makes Alt+Enter switch to its own fullscreen - which
-    // would fight the platform's F11 one.
+    // Disable DXGI's Alt+Enter fullscreen so it doesn't fight the platform's F11.
     Renderer->Factory->MakeWindowAssociation(Window, DXGI_MWA_NO_ALT_ENTER);
 
     // ------------------------------------------------------------------
-    // The RTV heap - one slot per swap chain buffer - and a render target
-    // view of each buffer in it (Luna 4.3.5, 4.3.6).
+    // RTV heap (one slot per back buffer) and a render target view of each.
     // ------------------------------------------------------------------
     if(!DescriptorHeapInit(&Renderer->RtvHeap, Renderer->Device,
                            D3D12_DESCRIPTOR_HEAP_TYPE_RTV, SWAP_CHAIN_BUFFER_COUNT,
@@ -1260,8 +1208,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     }
 
     // ------------------------------------------------------------------
-    // The depth/stencil buffer, and a one-slot DSV heap for its view (Luna
-    // 4.3.7).
+    // Depth buffer, with a one-slot DSV heap for its view.
     // ------------------------------------------------------------------
     if(!DescriptorHeapInit(&Renderer->DsvHeap, Renderer->Device,
                            D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, Thread, Memory))
@@ -1279,8 +1226,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     }
 
     // ------------------------------------------------------------------
-    // The shader-visible heap.  Only one CBV/SRV/UAV heap can be bound at a
-    // time, so this one heap holds everything shaders read.
+    // Shader-visible heap: one for everything shaders read, since only one
+    // can be bound at a time.
     // ------------------------------------------------------------------
     if(!DescriptorHeapInit(&Renderer->SrvHeap, Renderer->Device,
                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, SRV_HEAP_CAPACITY,
@@ -1293,12 +1240,13 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     Renderer->SrvNextUnused = 0;
     Renderer->SrvFreeCount = 0;
 
-    // Hot pink: 255, 105, 180.  The debug UI can change it.
+    // Hot pink (255, 105, 180), so the cleared background is obvious; the debug UI can change it.
     Renderer->ClearColor[0] = 1.0f;
     Renderer->ClearColor[1] = 0.41f;
     Renderer->ClearColor[2] = 0.71f;
     Renderer->ClearColor[3] = 1.0f;
 
+    // A missing compiler or cube isn't fatal: the game runs with just the clear colour.
     if(!LoadShaderCompiler(Renderer, Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: No shader compiler - nothing will be drawn.\n");
@@ -1311,8 +1259,8 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     return(true);
 }
 
-// Width and Height are the window's new INNER size - the part you draw into.
-// Never called with 0: the platform does not run the game while minimised.
+// Resizes the swap chain and depth buffer to the window's new inner size.
+// Never called with 0: the game doesn't run while minimised.
 internal void
 RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
                i32 Width, i32 Height)
@@ -1325,16 +1273,15 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         return;
     }
 
-    // The GPU may still be drawing into, or presenting, the old buffers.
+    // Wait: the GPU may still be using the old buffers.
     FlushCommandQueue(Renderer);
 
     // IMPORTANT(yigit): ResizeBuffers fails while ANYTHING still holds one
     // of the old buffers - so ours go first, and come back after.
     ReleaseBackBuffers(Renderer);
 
-    // 0 and DXGI_FORMAT_UNKNOWN keep the buffer count and the format.  The
-    // flags must be the ones the swap chain was made with, or tearing
-    // support is silently lost.
+    // 0 and UNKNOWN keep the buffer count and format.  Same flags as creation,
+    // or tearing support is silently lost.
     if(!DX12_FAILED(Renderer->SwapChain->ResizeBuffers(0, (UINT)Width, (UINT)Height,
                                                        DXGI_FORMAT_UNKNOWN,
                                                        Renderer->SwapChainFlags)))
@@ -1344,15 +1291,13 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         RendererLog(Thread, Memory, Line);
     }
 
-    // New buffers, so new views - written over the old ones, same slots.
-    // If the resize failed, these are the old buffers again.
+    // Re-fetch the buffers and rewrite their views (the old ones again if the resize failed).
     if(!AcquireBackBuffers(Renderer, Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: Could not get the swap chain's buffers after a resize.\n");
     }
 
-    // ResizeBuffers only resizes the swap chain's own buffers.  The depth
-    // buffer is ours: a new one at the new size, its view in the same slot.
+    // The depth buffer isn't part of the swap chain, so rebuild it at the new size.
     ReleaseAndZero(Renderer->DepthBuffer);
     if(!CreateDepthBuffer(Renderer, Width, Height, Thread, Memory))
     {
@@ -1360,10 +1305,8 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     }
 }
 
-// Input holds this frame's keyboard and mouse (see platform.h), and
-// Input->dtForFrame how long the last frame took, for anything that moves.
-// CubeWorld and ViewProj are ordinary row-vector matrices from the game, as
-// XMFLOAT4X4 - DirectXMath's storage type, safe to pass around.
+// Records and submits one frame: clear, draw the cube, draw ImGui, present.
+// CubeWorld and ViewProj are row-vector matrices from the game.
 internal void
 RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
                game_input *Input, const XMFLOAT4X4 *CubeWorld, const XMFLOAT4X4 *ViewProj)
@@ -1373,23 +1316,18 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         return;
     }
 
-    // Last frame ended with a flush, so the GPU is done with everything in
-    // the allocator - safe to reuse its memory.  Then start recording.  If
-    // either fails, there is nothing to record into this frame.
+    // Reuse the allocator's memory (safe: last frame ended with a flush) and start recording.
     if(DX12_FAILED(Renderer->CommandAllocator->Reset()) ||
        DX12_FAILED(Renderer->CommandList->Reset(Renderer->CommandAllocator, 0)))
     {
         return;
     }
 
-    // With the flip model, the buffer to draw into is not always number 0.
+    // Ask which buffer to draw into: with flip-model it alternates.
     u32 BackBufferIndex = Renderer->SwapChain->GetCurrentBackBufferIndex();
     ID3D12Resource *BackBuffer = Renderer->BackBuffers[BackBufferIndex];
 
-    // A resource is in one state at a time, and the GPU must be told when it
-    // changes - it may need to finish reads, flush caches or change how the
-    // memory is laid out first.  The buffer comes back from the screen in
-    // PRESENT; drawing into it needs RENDER_TARGET.
+    // PRESENT -> RENDER_TARGET, so the GPU finishes showing it before we draw into it.
     D3D12_RESOURCE_BARRIER ToRenderTarget =
         TransitionBarrier(BackBuffer, D3D12_RESOURCE_STATE_PRESENT,
                           D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1398,22 +1336,18 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     D3D12_CPU_DESCRIPTOR_HANDLE Rtv = DescriptorCpuHandle(&Renderer->RtvHeap, BackBufferIndex);
     D3D12_CPU_DESCRIPTOR_HANDLE Dsv = DescriptorCpuHandle(&Renderer->DsvHeap, 0);
 
-    // Hot pink to start with - the debug UI can change it.
+    // Clear colour, so no old frame shows through.
     Renderer->CommandList->ClearRenderTargetView(Rtv, Renderer->ClearColor, 0, 0);
 
-    // Every pixel starts at the far plane, so anything drawn is in front,
-    // and with no stencil mark.  Both flags clear both parts in one call.
+    // Depth to the far plane so anything drawn is nearer; stencil to 0.
     Renderer->CommandList->ClearDepthStencilView(Dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                                  DEPTH_CLEAR_VALUE, STENCIL_CLEAR_VALUE, 0, 0);
 
-    // "Output merger": the colour image and the depth buffer the next draws
-    // write into.
+    // Draw into this back buffer and the depth buffer.
     Renderer->CommandList->OMSetRenderTargets(1, &Rtv, FALSE, &Dsv);
 
-    // The viewport (Luna 4.3.8): where on the back buffer to draw - all of
-    // it.  It turns the shaders' -1..1 coordinates into pixels, and maps
-    // depth 0..1 onto MinDepth..MaxDepth (left as they are).  Reset clears
-    // it, so it is set every frame.
+    // Viewport: map clip space onto the whole window and depth onto 0..1.
+    // Reset clears it, so it's set every frame.
     D3D12_VIEWPORT Viewport = {};
     Viewport.TopLeftX = 0.0f;
     Viewport.TopLeftY = 0.0f;
@@ -1423,7 +1357,7 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     Viewport.MaxDepth = 1.0f;
     Renderer->CommandList->RSSetViewports(1, &Viewport);
 
-    // The scissor rectangle (Luna 4.3.9): pixels outside it are thrown away.
+    // Scissor: keep pixels inside the whole window.
     // IMPORTANT(yigit): In D3D12 the scissor test is ALWAYS on, and the
     // default rectangle is empty - forget this and nothing is ever drawn.
     // Clears ignore both, which is why the pink worked without them.
@@ -1431,43 +1365,36 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     Renderer->CommandList->RSSetScissorRects(1, &Scissor);
 
     //NOTE:(yigit): Drawing
-    // Milestone 5: the cube.  First its constants, written by the CPU
-    // straight into the mapped upload buffer.  Safe only because the last
-    // frame ended with a flush, so the GPU is not reading them right now.
-    // (Frames in flight - Luna chapter 7 - will need one copy per frame.)
+    // Only if the cube was created successfully.
     if(Renderer->CubePipeline && Renderer->ConstantBufferMapped)
     {
-        // TRANSPOSED on the way in, exactly as Luna does (6.6.3): HLSL reads
-        // a float4x4 in a constant buffer column by column, while these are
-        // stored row by row.  XMLoadFloat4x4 brings a matrix into an
-        // XMMATRIX - SSE registers - for the maths; XMStoreFloat4x4 writes
-        // it back out to plain floats.
+        // Transpose because HLSL reads constant-buffer matrices column by column.
         object_constants Object;
         pass_constants Pass;
         XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(CubeWorld)));
         XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
 
+        // Write straight into the mapped constant buffer.  Safe only because
+        // last frame's flush means the GPU isn't reading it now.
         memcpy(Renderer->ConstantBufferMapped + 0*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
         memcpy(Renderer->ConstantBufferMapped + 1*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
 
-        // Where those two slots are, as the GPU sees them.
         D3D12_GPU_VIRTUAL_ADDRESS Constants = Renderer->ConstantBuffer->GetGPUVirtualAddress();
 
         Renderer->CommandList->SetGraphicsRootSignature(Renderer->CubeRootSignature);
         Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
 
-        // Root parameter 0 (b0) and 1 (b1): just the addresses.
+        // Point b0 and b1 at their slots.
         Renderer->CommandList->SetGraphicsRootConstantBufferView(0, Constants + 0*CONSTANT_BUFFER_SLOT_SIZE);
         Renderer->CommandList->SetGraphicsRootConstantBufferView(1, Constants + 1*CONSTANT_BUFFER_SLOT_SIZE);
 
+        // Every 3 indices form one triangle; positions from slot 0, colours from slot 1.
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         mesh *Mesh = &Renderer->CubeMesh;
-        Renderer->CommandList->IASetVertexBuffers(0, 1, &Mesh->VertexView);
+        Renderer->CommandList->IASetVertexBuffers(0, 2, Mesh->VertexViews);
         Renderer->CommandList->IASetIndexBuffer(&Mesh->IndexView);
 
-        // The buffers are set once; each submesh is then just three numbers:
-        // how many indices, the first one, and what to add to each (Luna
-        // 6.3).  1 instance, starting at instance 0.
+        // Buffers are bound once; each submesh then draws its own index range.  One instance.
         for(u32 SubmeshIndex = 0; SubmeshIndex < Mesh->SubmeshCount; ++SubmeshIndex)
         {
             submesh *Submesh = &Mesh->Submeshes[SubmeshIndex];
@@ -1476,9 +1403,8 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         }
     }
 
-    // Dear ImGui last, so it is on top of everything.  Its font texture is
-    // in the shader-visible heap, which has to be bound for it to be read.
-    // GetDrawData is 0 unless ImGui::Render ran this frame.
+    // ImGui last, so it's drawn on top.  Bind the shader-visible heap because
+    // its font texture lives there.
     if(Renderer->ImGui)
     {
         ImDrawData *DrawData = ImGui::GetDrawData();
@@ -1490,14 +1416,13 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         }
     }
 
-    // And back to PRESENT, the only state Present accepts.
+    // RENDER_TARGET -> PRESENT, the only state Present accepts.
     D3D12_RESOURCE_BARRIER ToPresent =
         TransitionBarrier(BackBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
                           D3D12_RESOURCE_STATE_PRESENT);
     Renderer->CommandList->ResourceBarrier(1, &ToPresent);
 
-    // A list that fails to close has a mistake recorded in it - the debug
-    // layer says which - and must not be run.
+    // Close ends recording; it fails if a mistake was recorded, and then the list must not run.
     if(DX12_FAILED(Renderer->CommandList->Close()))
     {
         return;
@@ -1505,11 +1430,7 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     ID3D12CommandList *Lists[] = {Renderer->CommandList};
     Renderer->Queue->ExecuteCommandLists(1, Lists);
 
-    // Sync interval 1: wait for the monitor's next refresh (vsync).  The
-    // platform has no frame limiter of its own, so this is what paces the
-    // game.  Vsync off would be Present(0, DXGI_PRESENT_ALLOW_TEARING) when
-    // Renderer->SupportsTearing - but only with a frame limiter, or the
-    // loop runs at thousands of frames a second.
+    // Show the frame at the next monitor refresh (vsync), which also paces the game.
     DX12_FAILED(Renderer->SwapChain->Present(1, 0));
 
     // NOTE(yigit): Waits for the GPU every frame, so the CPU and GPU take
@@ -1518,16 +1439,10 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 }
 
 /*
-  How much video memory this process uses, against what Windows lets it use.
-
-  Local is the card's own VRAM; NonLocal is system RAM the GPU reaches over
-  PCI Express ("shared").  In each:
-    Budget        what Windows will let THIS process use right now.  Less
-                  than the card has - other programs and the desktop need
-                  some - and it changes as they come and go.
-    CurrentUsage  what this process is using.  Past the budget, Windows
-                  starts moving our memory out to RAM: stutters.
-  False if the adapter cannot answer (no IDXGIAdapter3).
+  Fills in this process's video memory budget and usage, for the debug UI.
+  Local = the card's VRAM, NonLocal = system RAM the GPU can use.  Going over
+  Budget makes Windows move memory out to RAM, which causes stutters.
+  False if there's no IDXGIAdapter3 to ask.
 */
 internal b32
 RendererGetVideoMemory(dx12_renderer *Renderer, DXGI_QUERY_VIDEO_MEMORY_INFO *Local,
@@ -1536,24 +1451,25 @@ RendererGetVideoMemory(dx12_renderer *Renderer, DXGI_QUERY_VIDEO_MEMORY_INFO *Lo
     b32 Result = false;
     if(Renderer->Adapter3)
     {
-        // 0: the first (only) GPU node.
+        // Node 0: single GPU.
         Result = (SUCCEEDED(Renderer->Adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, Local)) &&
                   SUCCEEDED(Renderer->Adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, NonLocal)));
     }
     return(Result);
 }
 
-// Waits until the GPU has finished everything queued so far.
+// Blocks until the GPU has finished all submitted work, so its memory can be
+// reused or released safely.
 internal void
 FlushCommandQueue(dx12_renderer *Renderer)
 {
-    // Nothing to wait for - and nothing to Signal with - when
-    // RendererInitialize failed before these were made.
+    // Nothing to wait on if initialization failed before these existed.
     if(!Renderer->Queue || !Renderer->Fence)
     {
         return;
     }
 
+    // Queue a signal with a new value, then sleep until the GPU reaches it.
     ++Renderer->FenceValue;
     Renderer->Queue->Signal(Renderer->Fence, Renderer->FenceValue);
 
@@ -1564,15 +1480,14 @@ FlushCommandQueue(dx12_renderer *Renderer)
     }
 }
 
-// Wait for the GPU to finish before anything is released - it may still be
-// using the resources the last frame submitted.
+// Releases everything, after waiting for the GPU to stop using it.
 internal void
 RendererShutdown(dx12_renderer *Renderer)
 {
     FlushCommandQueue(Renderer);
 
-    // Checked: a failed RendererInitialize may not have made it, and under
-    // a debugger CloseHandle on a bad handle raises an exception.
+    // Checked because a failed RendererInitialize may not have created it,
+    // and closing a bad handle under a debugger raises an exception.
     if(Renderer->FenceEvent)
     {
         CloseHandle(Renderer->FenceEvent);
@@ -1581,8 +1496,7 @@ RendererShutdown(dx12_renderer *Renderer)
 
     //NOTE(yigit): Order matters. Newest first.
 
-    // ImGui uses SrvHeap, so it must be stopped first - GameShutdown and
-    // GameUnload see to that.
+    // ImGui must already be stopped (GameShutdown/GameUnload do it) because it uses SrvHeap.
     Assert(!Renderer->ImGui);
     if(Renderer->ConstantBuffer && Renderer->ConstantBufferMapped)
     {
@@ -1591,7 +1505,8 @@ RendererShutdown(dx12_renderer *Renderer)
     }
     ReleaseAndZero(Renderer->ConstantBuffer);
     ReleaseAndZero(Renderer->CubeMesh.IndexBuffer);
-    ReleaseAndZero(Renderer->CubeMesh.VertexBuffer);
+    ReleaseAndZero(Renderer->CubeMesh.VertexBuffers[0]);
+    ReleaseAndZero(Renderer->CubeMesh.VertexBuffers[1]);
     ReleaseAndZero(Renderer->CubePipeline);
     ReleaseAndZero(Renderer->CubeRootSignature);
     ReleaseAndZero(Renderer->DxcCompiler);
