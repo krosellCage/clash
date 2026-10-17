@@ -17,7 +17,10 @@ RUNNING TOTALS (update when they change)
 --------------------------------------------------------------------------
   Current phase ......... 2 - First pixels in DX12
   Luna (DX12 book) ...... ~290 / ~900 pages (chapters 4-6 done, chapter 7 next)
-  Renderer milestones ... 1-5 done, 6 (textured cube) after Luna 7-9
+  Renderer milestones ... 1-5 done, 6 (frame resources, Luna 7) next
+  Renderer goal ......... milestone 13: SUN TEMPLE, LIT (~6-7 weeks) -
+                          via Sponza (9), PBR (10), shadows (11), HDR (12).
+                          The full list is at the top of dx12_renderer.cpp.
   Handmade Hero ......... 3 episodes this log
   Reading list hours .... see moba_reading_list.txt for phase budgets
 

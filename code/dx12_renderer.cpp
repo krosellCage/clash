@@ -24,7 +24,23 @@
     4. Root signature, pipeline state object, a vertex buffer, a shader in
        data\ - A TRIANGLE.
     5. A spinning cube: index buffer, constant buffer, depth buffer.
-    6. A textured cube: descriptor heaps, a texture, the upload path.
+    6. Frame resources (Luna 7): the CPU builds the next frame while the
+       GPU draws this one - no flush every frame - and many objects, each
+       with its own constants.
+    7. Light (Luna 8): normals; directional, point and spot lights;
+       Blinn-Phong.
+    8. A textured cube (Luna 9): descriptor heaps, a texture, the upload
+       path, samplers, mipmaps.  PNG/JPG through stb_image.
+    9. A model from a file: glTF through cgltf - DamagedHelmet first, then
+       SPONZA, lit with milestone 7's lights.
+   10. PBR: Blinn-Phong swapped for GGX (learnopengl's PBR chapters,
+       Karis's "Real Shading in UE4"), metal/roughness textures.  Checked
+       against MetalRoughSpheres' reference image.
+   11. Normal maps and sun shadows (Luna 19, 20).
+   12. HDR render target and tone mapping, SSAO, a sky (Luna 21, 18).
+   13. SUN TEMPLE, LIT - the showcase.  FBX through ufbx (or a converter
+       to clash's own asset format), the sun, the fires and the emissive
+       surfaces in HDR.
 */
 
 // Include guard: game_imgui.cpp includes this file too, so it must compile once.
