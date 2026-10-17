@@ -103,6 +103,7 @@ struct object_constants
 struct pass_constants
 {
     XMFLOAT4X4 ViewProj;
+    XMFLOAT4 PulseColor;
     r32 gTime;
 };
 
@@ -666,7 +667,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory)
     Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     Parameters[1].Descriptor.ShaderRegister = 1;        // b1: PassConstants
     Parameters[1].Descriptor.RegisterSpace = 0;
-    Parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    Parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     // ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT: we feed vertices through an input layout.
     D3D12_ROOT_SIGNATURE_DESC RootDesc = {};
@@ -1409,6 +1410,7 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         // Pass: camera and time, to slot 2.
         XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
         Pass.gTime = Time;
+        Pass.PulseColor = {1.0f,0.0f,0.50f,1.0f};
         memcpy(Renderer->ConstantBufferMapped + BOX_COUNT*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
         D3D12_GPU_VIRTUAL_ADDRESS Constants = Renderer->ConstantBuffer->GetGPUVirtualAddress();
 

@@ -6,6 +6,7 @@ cbuffer ObjectConstants : register(b0)
 cbuffer PassConstants : register(b1)
 {
     float4x4 ViewProj;
+    float4   PulseColor;
     float gTime;
 };
 
@@ -21,6 +22,12 @@ struct vertex_out
     float4 Color : COLOR;
 };
 
+float EaseInOut(float x)
+{
+    float Result = 0.5 - 0.5 * cos(x);
+    return Result;
+}
+
 vertex_out VS(vertex_in In)
 {
     vertex_out Out;
@@ -30,12 +37,17 @@ vertex_out VS(vertex_in In)
 
     float4 WorldPosition = mul(float4(In.Position, 1.0f), World);
     Out.Position = mul(WorldPosition, ViewProj);
-    Out.Color = In.Color;
+    Out.Color = In.Color; 
 
     return Out;
 }
 
 float4 PS(vertex_out In) : SV_TARGET
 {
-    return In.Color;
+    const float pi = 3.14159;
+    // Oscillate a value in [0,1] over time using a sine function.
+    float s = 0.5f*sin(2*gTime - 0.25f*pi)+ 0.5f;
+
+    float4 c = lerp(In.Color, PulseColor, s);
+    return c;
 }
