@@ -16,7 +16,8 @@ Fields:
 RUNNING TOTALS (update when they change)
 --------------------------------------------------------------------------
   Current phase ......... 2 - First pixels in DX12
-  Luna (DX12 book) ...... 30 / ~900 pages (in chapter 4)
+  Luna (DX12 book) ...... ~290 / ~900 pages (chapters 4-6 done, chapter 7 next)
+  Renderer milestones ... 1-5 done, 6 (textured cube) after Luna 7-9
   Handmade Hero ......... 3 episodes this log
   Reading list hours .... see moba_reading_list.txt for phase budgets
 
@@ -90,7 +91,8 @@ LOG
 
 2026-10-16
   Read   Luna chapter 5 (exercises skipped - they come back in chapters
-         6, 15, 16, 17, 20, 21), chapter 6 "Drawing in Direct3D"
+         6, 15, 16, 17, 20, 21), chapter 6 "Drawing in Direct3D",
+         6.8 rasterizer state, 6.9 PSO, 6.10 geometry helper structure
   Watch
   Built  DXC v1.9.2609 in code/external/dxc, loaded at run time.
          Milestone 4: the first triangle - typed by hand - with its
@@ -100,7 +102,43 @@ LOG
          index buffer, vertex and index buffers in VRAM through an upload
          (CreateStaticBuffer), two root CBVs (World, ViewProj) from a
          mapped constant buffer, DirectXMath matrices transposed on the
-         way in.  The triangle is gone.
+         way in.  The triangle is gone.  Luna 6.10: mesh and submesh
+         structs (IndexCount, StartIndex, BaseVertex) replace the cube's
+         loose fields.  Chapter 6 exercises: 1 (input layout on paper),
+         2 (positions and colours in two vertex buffers, input slots 0
+         and 1), 3 (point/line/triangle topologies, tried and reverted),
+         4 (a pyramid, green base, red tip), 6 (vertices wobble in the
+         vertex shader with gTime, sent through PassConstants).  Every
+         comment in dx12_renderer.cpp rewritten as what + why.
   Hours
   Next   Chapter 6 exercises 4, 7, 8 and 9 on the cube.  Then chapter 7:
          frame resources, so the CPU and GPU stop taking turns.
+
+2026-10-17
+  Read   Luna chapter 6 exercises 5, 7-14
+  Watch
+  Built  Platform: the working directory fix for subst drives - run as
+         T:\build\clash.exe it set "T:" (the current folder on T, not its
+         root), so shaders were only found through a stray build\data
+         copy, now deleted.  Exercise 7: cube and pyramid in one vertex
+         and one index buffer, the pyramid's indices unchanged and placed
+         by its submesh (BaseVertex 8, StartIndex 36); a constant buffer
+         slot per object, b0 re-pointed before each draw, b1 at the pass
+         slot.  Exercise 8: a 3x3 grid of boxes from one cube - BOX_COUNT
+         World slots plus the pass slot, one draw per box.  Exercise 10:
+         4-byte XMCOLOR colours, DXGI_FORMAT_B8G8R8A8_UNORM.  Exercises 11
+         (input layout / HLSL struct order: names and offsets matter,
+         order does not) and 12 (half-width viewport squeezes the scene)
+         tried and reverted.  Exercise 14 started: EaseInOut in cube.hlsl,
+         b1 visible to every shader.  build.bat prints compile times
+         (~2.3 s game.dll, ~0.5 s clash.exe).  Neovim: HLSL highlighting
+         (syntax/hlsl.vim), IMPORTANT in purple.
+         Learned the hard way: hot reload breaks across struct changes;
+         one constant buffer slot per object because the GPU reads them
+         after the CPU has finished writing; root parameter (which
+         register) is not the slot (which address); a black screen means
+         read the log - the PSO failure names the register and shader.
+  Hours
+  Next   Finish exercise 14 (the tint in the pixel shader), then 9
+         (wireframe, culling) and 13 (scissor).  Then Luna chapter 7:
+         frame resources - stop waiting for the GPU every frame.
