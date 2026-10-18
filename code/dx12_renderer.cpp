@@ -88,6 +88,30 @@
 #define OBJECT_SLOT_COUNT 64
 #define CONSTANT_BUFFER_SLOT_COUNT (FIRST_OBJECT_SLOT + OBJECT_SLOT_COUNT)
 
+// Frame resources (Luna 7.2): how many frames the CPU may record ahead of the
+// GPU.  Each frame gets its own copy of everything it writes - so while the
+// GPU still draws frame N, the CPU fills frame N+1's copy instead of
+// waiting.  3: the CPU may get up to two frames ahead.
+#define FRAME_RESOURCE_COUNT 3
+
+struct frame_resource
+{
+    // The memory this frame's commands are recorded into.  Reset only once
+    // the GPU has run them - i.e. once the fence has reached FenceValue.
+    ID3D12CommandAllocator *CommandAllocator;
+
+    // This frame's constant buffer slots (pass + objects), in an UPLOAD heap
+    // and mapped for good, like before - one per frame, so writing this
+    // frame's never changes a slot an earlier frame's draws still read.
+    ID3D12Resource *ConstantBuffer;
+    u8 *ConstantBufferMapped;
+
+    // The fence value signalled after this frame's commands: once the GPU's
+    // fence has reached it, this frame resource is free to reuse.  0 = never
+    // used yet, so nothing to wait for.
+    u64 FenceValue;
+};
+
 // Positions only: vertex buffer slot 0.
 struct VPosData
 {
@@ -155,6 +179,7 @@ enum shape_id
     SHAPE_PYRAMID,
     SHAPE_FLOOR,
     SHAPE_CYLINDER,
+    SHAPE_CONE,
 
     SHAPE_COUNT
 };
@@ -256,8 +281,9 @@ struct dx12_renderer
     b32 SupportsMeshShaders;
     ID3D12Device5 *Device5;
 
-    // CPU records commands into the list (memory from the allocator); the queue
-    // runs closed lists on the GPU.
+    // CPU records commands into the list (memory from an allocator); the queue
+    // runs closed lists on the GPU.  This allocator is for one-off work at
+    // startup (uploads) - each frame records into its own frame resource's.
     ID3D12CommandQueue *Queue;
     ID3D12CommandAllocator *CommandAllocator;
     ID3D12GraphicsCommandList *CommandList;
@@ -302,10 +328,10 @@ struct dx12_renderer
     ID3D12PipelineState *FloorPipeline;     // same root signature, floor.hlsl: no wobble, no pulse
     mesh CubeMesh;
 
-    // Upload-heap buffer for per-frame matrices, mapped permanently so the CPU
-    // can write it every frame without Map/Unmap.
-    ID3D12Resource *ConstantBuffer;
-    u8 *ConstantBufferMapped;       // CPU pointer into it
+    // One set of per-frame things for each frame in flight, used in turn.
+    // FrameIndex is the one the frame being recorded uses.
+    frame_resource Frames[FRAME_RESOURCE_COUNT];
+    u32 FrameIndex;
     u32 ObjectSlotsUsed;            // this frame's, so far - DrawShape takes the next one
 
     // ImGui's state; 0 when not running.  Created after each game.dll load,
@@ -1011,6 +1037,10 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     mesh_gen_data Cylinder = MeshGenCylinder(Scratch, 1.0f, 0.5f, 3.0f, 20, 4);
     Mesh->Submeshes[SHAPE_CYLINDER] = AddGeneratedShape(&Builder, &Cylinder, XMCOLOR(1.0f, 0.5f, 0.0f, 1.0f));
 
+    //cone
+
+    mesh_gen_data Cone = MeshGenCylinder(Scratch, 1.0f, 0.0f, 3.0f, 20, 4);
+    Mesh->Submeshes[SHAPE_CONE] = AddGeneratedShape(&Builder, &Cone, XMCOLOR(1.0f, 0.0f, 0.0f, 1.0f));
     Mesh->SubmeshCount = SHAPE_COUNT;
 
     // Upload positions, colours and indices to VRAM.
@@ -1044,24 +1074,29 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     ResetArena(Scratch);
 
     // ------------------------------------------------------------------
-    // 8. Constant buffer: 256-byte slots - the pass, then one per object -
-    //    in an UPLOAD heap because the CPU rewrites them every frame.
-    //    Mapped once and left mapped, which upload heaps allow.
+    // 8. Constant buffers, one per frame resource: 256-byte slots - the
+    //    pass, then one per object - in an UPLOAD heap because the CPU
+    //    rewrites them every frame.  Mapped once and left mapped, which
+    //    upload heaps allow.
     // ------------------------------------------------------------------
     D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
     D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer(CONSTANT_BUFFER_SLOT_COUNT*CONSTANT_BUFFER_SLOT_SIZE);
-    if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &ConstantDesc,
-                                                             D3D12_RESOURCE_STATE_GENERIC_READ, 0,
-                                                             IID_PPV_ARGS(&Renderer->ConstantBuffer))))
+    for(u32 FrameIndex = 0; FrameIndex < FRAME_RESOURCE_COUNT; ++FrameIndex)
     {
-        return(false);
-    }
+        frame_resource *Frame = &Renderer->Frames[FrameIndex];
+        if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &ConstantDesc,
+                                                                 D3D12_RESOURCE_STATE_GENERIC_READ, 0,
+                                                                 IID_PPV_ARGS(&Frame->ConstantBuffer))))
+        {
+            return(false);
+        }
 
-    // Empty read range: the CPU only writes.
-    D3D12_RANGE NoRead = {0, 0};
-    if(DX12_FAILED(Renderer->ConstantBuffer->Map(0, &NoRead, (void **)&Renderer->ConstantBufferMapped)))
-    {
-        return(false);
+        // Empty read range: the CPU only writes.
+        D3D12_RANGE NoRead = {0, 0};
+        if(DX12_FAILED(Frame->ConstantBuffer->Map(0, &NoRead, (void **)&Frame->ConstantBufferMapped)))
+        {
+            return(false);
+        }
     }
 
     return(true);
@@ -1286,6 +1321,18 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
+    // One more allocator per frame resource, so a frame can record while the
+    // GPU still runs the commands in the previous frames' allocators.
+    for(u32 FrameIndex = 0; FrameIndex < FRAME_RESOURCE_COUNT; ++FrameIndex)
+    {
+        if(DX12_FAILED(Renderer->Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                IID_PPV_ARGS(&Renderer->Frames[FrameIndex].CommandAllocator))))
+        {
+            RendererShutdown(Renderer);
+            return(false);
+        }
+    }
+
     // Node 0 (single GPU), no initial PSO (set while recording instead).
     if(DX12_FAILED(Renderer->Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                        Renderer->CommandAllocator, 0,
@@ -1475,26 +1522,38 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     }
 }
 
+// Sleeps until the GPU's fence has reached Value - until the commands
+// signalled with it have run.  Returns at once if it already has (and for 0,
+// which every fence starts past).
+internal void
+WaitForFence(dx12_renderer *Renderer, u64 Value)
+{
+    if(Renderer->Fence->GetCompletedValue() < Value)
+    {
+        Renderer->Fence->SetEventOnCompletion(Value, Renderer->FenceEvent);
+        WaitForSingleObject(Renderer->FenceEvent, INFINITE);
+    }
+}
+
 // Draws one of CubeMesh's shapes at World: writes World to the next free
-// object slot, points b0 at that slot, and draws the shape's part of the
-// buffers.  The pipeline, b1 and the buffers must already be set.
+// object slot of this frame's constant buffer, points b0 at that slot, and
+// draws the shape's part of the buffers.  The pipeline, b1 and the buffers
+// must already be set.
 internal void
 DrawShape(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World)
 {
     Assert(Renderer->ObjectSlotsUsed < OBJECT_SLOT_COUNT);
     u32 Slot = FIRST_OBJECT_SLOT + Renderer->ObjectSlotsUsed++;
+    frame_resource *Frame = &Renderer->Frames[Renderer->FrameIndex];
 
-    // Transposed because HLSL reads constant-buffer matrices column by column.
     object_constants Object;
     XMStoreFloat4x4(&Object.World, XMMatrixTranspose(World));
-    memcpy(Renderer->ConstantBufferMapped + Slot*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
-
+    memcpy(Frame->ConstantBufferMapped + Slot * CONSTANT_BUFFER_SLOT_SIZE,
+           &Object, sizeof(Object));
     Renderer->CommandList->SetGraphicsRootConstantBufferView(0,
-            Renderer->ConstantBuffer->GetGPUVirtualAddress() + Slot*CONSTANT_BUFFER_SLOT_SIZE);
-
+            Frame->ConstantBuffer->GetGPUVirtualAddress() + Slot * CONSTANT_BUFFER_SLOT_SIZE);
     submesh *Part = &Renderer->CubeMesh.Submeshes[Shape];
-    Renderer->CommandList->DrawIndexedInstanced(Part->IndexCount, 1, Part->StartIndex,
-                                                Part->BaseVertex, 0);
+    Renderer->CommandList->DrawIndexedInstanced(Part->IndexCount, 1, Part->StartIndex, Part->BaseVertex, 0);
 }
 
 // Records and submits one frame: clear, draw the cube, draw ImGui, present.
@@ -1508,9 +1567,18 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         return;
     }
 
-    // Reuse the allocator's memory (safe: last frame ended with a flush) and start recording.
-    if(DX12_FAILED(Renderer->CommandAllocator->Reset()) ||
-       DX12_FAILED(Renderer->CommandList->Reset(Renderer->CommandAllocator, 0)))
+    // On to the next frame resource.  The GPU may still be running the frame
+    // that last used it, FRAME_RESOURCE_COUNT frames ago - wait until it has
+    // finished.  Usually it already has, and this returns at once: the wait
+    // only happens when the CPU gets too far ahead.
+    Renderer->FrameIndex = (Renderer->FrameIndex + 1) % FRAME_RESOURCE_COUNT;
+    frame_resource *Frame = &Renderer->Frames[Renderer->FrameIndex];
+    WaitForFence(Renderer, Frame->FenceValue);
+
+    // Now its allocator's memory and its constant buffer are free: reuse the
+    // memory and start recording.
+    if(DX12_FAILED(Frame->CommandAllocator->Reset()) ||
+       DX12_FAILED(Renderer->CommandList->Reset(Frame->CommandAllocator, 0)))
     {
         return;
     }
@@ -1558,21 +1626,22 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 
     //NOTE:(yigit): Drawing
     // Only if the cube was created successfully.
-    if(Renderer->CubePipeline && Renderer->ConstantBufferMapped)
+    if(Renderer->CubePipeline && Frame->ConstantBufferMapped)
     {
-        // The pass: camera and time, into slot 0, read by every draw through b1.
+        // The pass: camera and time, into slot 0 of this frame's constant
+        // buffer, read by every draw through b1.
         // Transposed because HLSL reads constant-buffer matrices column by column.
         pass_constants Pass;
         XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
         Pass.gTime = Time;
         Pass.PulseColor = {1.0f,0.0f,0.50f,1.0f};
-        memcpy(Renderer->ConstantBufferMapped + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
+        memcpy(Frame->ConstantBufferMapped + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
 
         // Set once for every shape: the root signature, b1 at the pass slot,
         // and the buffers all the shapes live in.
         Renderer->CommandList->SetGraphicsRootSignature(Renderer->CubeRootSignature);
         Renderer->CommandList->SetGraphicsRootConstantBufferView(1,
-                Renderer->ConstantBuffer->GetGPUVirtualAddress() + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE);
+                Frame->ConstantBuffer->GetGPUVirtualAddress() + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE);
         // Every 3 indices form one triangle; positions from slot 0, colours from slot 1.
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         Renderer->CommandList->IASetVertexBuffers(0, 2, Renderer->CubeMesh.VertexViews);
@@ -1589,10 +1658,15 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         }
 
         // Still: the floor, below the boxes, and the cylinder standing on it
-        // to their right (3 tall and centred, so its middle is 1.5 above -5).
         Renderer->CommandList->SetPipelineState(Renderer->FloorPipeline);
         DrawShape(Renderer, SHAPE_FLOOR, XMMatrixTranslation(0.0f, -5.0f, 0.0f));
-        DrawShape(Renderer, SHAPE_CYLINDER, XMMatrixTranslation(7.0f, -3.5f, 0.0f));
+        for(u32 i = 0; i < 5; i++ )
+        {
+            DrawShape(Renderer, SHAPE_CYLINDER, XMMatrixTranslation(((r32)i * 3.0f) - 6.0f, -3.5f, 9.0f));
+        }
+
+        DrawShape(Renderer, SHAPE_PYRAMID, XMMatrixTranslation(0.0f, -4.0f, -10.0f));
+        DrawShape(Renderer, SHAPE_CONE, XMMatrixTranslation(0.0f, -3.5f, -5.0f));
     }
 
     // ImGui last, so it's drawn on top.  Bind the shader-visible heap because
@@ -1625,9 +1699,13 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     // Show the frame at the next monitor refresh (vsync), which also paces the game.
     DX12_FAILED(Renderer->SwapChain->Present(1, 0));
 
-    // NOTE(yigit): Waits for the GPU every frame, so the CPU and GPU take
-    // turns instead of working at the same time.
-    FlushCommandQueue(Renderer);
+    // Mark the end of this frame's commands with a new fence value, and
+    // remember it in the frame resource.  No waiting here any more: the CPU
+    // goes straight on to the next frame, and only waits at the top of
+    // RendererRender if it comes back round to this frame resource before
+    // the GPU has reached the mark.
+    Frame->FenceValue = ++Renderer->FenceValue;
+    Renderer->Queue->Signal(Renderer->Fence, Frame->FenceValue);
 }
 
 /*
@@ -1662,14 +1740,10 @@ FlushCommandQueue(dx12_renderer *Renderer)
     }
 
     // Queue a signal with a new value, then sleep until the GPU reaches it.
+    // Every frame resource's value is lower, so they are all free after this.
     ++Renderer->FenceValue;
     Renderer->Queue->Signal(Renderer->Fence, Renderer->FenceValue);
-
-    if(Renderer->Fence->GetCompletedValue() < Renderer->FenceValue)
-    {
-        Renderer->Fence->SetEventOnCompletion(Renderer->FenceValue, Renderer->FenceEvent);
-        WaitForSingleObject(Renderer->FenceEvent, INFINITE);
-    }
+    WaitForFence(Renderer, Renderer->FenceValue);
 }
 
 // Releases everything, after waiting for the GPU to stop using it.
@@ -1690,12 +1764,16 @@ RendererShutdown(dx12_renderer *Renderer)
 
     // ImGui must already be stopped (GameShutdown/GameUnload do it) because it uses SrvHeap.
     Assert(!Renderer->ImGui);
-    if(Renderer->ConstantBuffer && Renderer->ConstantBufferMapped)
+    for(u32 FrameIndex = 0; FrameIndex < FRAME_RESOURCE_COUNT; ++FrameIndex)
     {
-        Renderer->ConstantBuffer->Unmap(0, 0);
-        Renderer->ConstantBufferMapped = 0;
+        frame_resource *Frame = &Renderer->Frames[FrameIndex];
+        if(Frame->ConstantBuffer && Frame->ConstantBufferMapped)
+        {
+            Frame->ConstantBuffer->Unmap(0, 0);
+            Frame->ConstantBufferMapped = 0;
+        }
+        ReleaseAndZero(Frame->ConstantBuffer);
     }
-    ReleaseAndZero(Renderer->ConstantBuffer);
     ReleaseAndZero(Renderer->CubeMesh.IndexBuffer);
     ReleaseAndZero(Renderer->CubeMesh.VertexBuffers[0]);
     ReleaseAndZero(Renderer->CubeMesh.VertexBuffers[1]);
@@ -1716,6 +1794,10 @@ RendererShutdown(dx12_renderer *Renderer)
     ReleaseAndZero(Renderer->RtvHeap.Heap);
     ReleaseAndZero(Renderer->SwapChain);
     ReleaseAndZero(Renderer->CommandList);
+    for(u32 FrameIndex = 0; FrameIndex < FRAME_RESOURCE_COUNT; ++FrameIndex)
+    {
+        ReleaseAndZero(Renderer->Frames[FrameIndex].CommandAllocator);
+    }
     ReleaseAndZero(Renderer->CommandAllocator);
     ReleaseAndZero(Renderer->Queue);
     ReleaseAndZero(Renderer->Fence);

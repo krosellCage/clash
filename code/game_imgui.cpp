@@ -70,7 +70,9 @@ ImGuiStart(dx12_renderer *Renderer)
     ImGui_ImplDX12_InitInfo Info;           // its constructor zeroes it
     Info.Device = Renderer->Device;
     Info.CommandQueue = Renderer->Queue;    // for uploading its textures
-    Info.NumFramesInFlight = SWAP_CHAIN_BUFFER_COUNT;
+    // ImGui keeps its own vertex buffers per frame, used in turn like our
+    // frame resources - so it needs as many as there can be frames in flight.
+    Info.NumFramesInFlight = FRAME_RESOURCE_COUNT;
     Info.RTVFormat = SWAP_CHAIN_FORMAT;
 
     // The depth buffer is bound while ImGui draws, so its pipeline has to
