@@ -81,6 +81,13 @@
 #define CONSTANT_BUFFER_SLOT_SIZE D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT
 #define BOX_COUNT 9
 
+// Constant buffer slots: the pass in slot 0, then one per object drawn this
+// frame, handed out in order by DrawShape - so nothing counts slots by hand.
+#define PASS_SLOT 0
+#define FIRST_OBJECT_SLOT 1
+#define OBJECT_SLOT_COUNT 64
+#define CONSTANT_BUFFER_SLOT_COUNT (FIRST_OBJECT_SLOT + OBJECT_SLOT_COUNT)
+
 // Positions only: vertex buffer slot 0.
 struct VPosData
 {
@@ -140,6 +147,93 @@ struct mesh
     u32 SubmeshCount;
     submesh Submeshes[MESH_MAX_SUBMESHES];
 };
+
+// The shapes in CubeMesh: each one's number is its place in Submeshes.
+enum shape_id
+{
+    SHAPE_CUBE,
+    SHAPE_PYRAMID,
+    SHAPE_FLOOR,
+    SHAPE_CYLINDER,
+
+    SHAPE_COUNT
+};
+
+// Collects shapes into one set of arrays, so they all go to the GPU as one
+// pair of vertex buffers and one index buffer.  Each Add copies a shape onto
+// the end and returns its submesh - where it landed.
+#define SHAPE_MAX_VERTICES 65536
+#define SHAPE_MAX_INDICES (3*65536)
+struct shape_builder
+{
+    VPosData *Positions;
+    VColorData *Colors;
+    u16 *Indices;
+    u32 VertexCount;
+    u32 IndexCount;
+    u32 MaxVertices;
+    u32 MaxIndices;
+};
+
+internal shape_builder
+BeginShapes(memory_arena *Arena, u32 MaxVertices, u32 MaxIndices)
+{
+    shape_builder Result = {};
+    Result.Positions = PushArray(Arena, MaxVertices, VPosData);
+    Result.Colors = PushArray(Arena, MaxVertices, VColorData);
+    Result.Indices = PushArray(Arena, MaxIndices, u16);
+    Result.MaxVertices = MaxVertices;
+    Result.MaxIndices = MaxIndices;
+    return(Result);
+}
+
+// A shape typed by hand: its positions, its colours (one per vertex), and
+// indices counting from its own vertex 0 - the submesh's BaseVertex moves them.
+internal submesh
+AddShape(shape_builder *Builder, VPosData *Positions, VColorData *Colors, u32 VertexCount,
+         u16 *Indices, u32 IndexCount)
+{
+    Assert((Builder->VertexCount + VertexCount) <= Builder->MaxVertices);
+    Assert((Builder->IndexCount + IndexCount) <= Builder->MaxIndices);
+
+    submesh Result;
+    Result.IndexCount = IndexCount;
+    Result.StartIndex = Builder->IndexCount;
+    Result.BaseVertex = (i32)Builder->VertexCount;
+
+    memcpy(Builder->Positions + Builder->VertexCount, Positions, VertexCount*sizeof(VPosData));
+    memcpy(Builder->Colors + Builder->VertexCount, Colors, VertexCount*sizeof(VColorData));
+    memcpy(Builder->Indices + Builder->IndexCount, Indices, IndexCount*sizeof(u16));
+    Builder->VertexCount += VertexCount;
+    Builder->IndexCount += IndexCount;
+
+    return(Result);
+}
+
+// A shape from MeshGen: its positions, all in one colour (mesh_gen_vertex has
+// none of its own).
+internal submesh
+AddGeneratedShape(shape_builder *Builder, mesh_gen_data *Shape, XMCOLOR Color)
+{
+    Assert((Builder->VertexCount + Shape->VertexCount) <= Builder->MaxVertices);
+    Assert((Builder->IndexCount + Shape->IndexCount) <= Builder->MaxIndices);
+
+    submesh Result;
+    Result.IndexCount = Shape->IndexCount;
+    Result.StartIndex = Builder->IndexCount;
+    Result.BaseVertex = (i32)Builder->VertexCount;
+
+    for(u32 VertexIndex = 0; VertexIndex < Shape->VertexCount; ++VertexIndex)
+    {
+        Builder->Positions[Builder->VertexCount + VertexIndex].Pos = Shape->Vertices[VertexIndex].Position;
+        Builder->Colors[Builder->VertexCount + VertexIndex].Color = Color;
+    }
+    memcpy(Builder->Indices + Builder->IndexCount, Shape->Indices, Shape->IndexCount*sizeof(u16));
+    Builder->VertexCount += Shape->VertexCount;
+    Builder->IndexCount += Shape->IndexCount;
+
+    return(Result);
+}
 
 // All renderer state.  Lives in game memory so it survives game.dll hot reloads.
 struct dx12_renderer
@@ -212,6 +306,7 @@ struct dx12_renderer
     // can write it every frame without Map/Unmap.
     ID3D12Resource *ConstantBuffer;
     u8 *ConstantBufferMapped;       // CPU pointer into it
+    u32 ObjectSlotsUsed;            // this frame's, so far - DrawShape takes the next one
 
     // ImGui's state; 0 when not running.  Created after each game.dll load,
     // destroyed in GameUnload.
@@ -894,46 +989,42 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
         2, 3, 4,   0, 2, 4,     // sides at z = +1 and x = -1
     };
 
-    // A floor, made by MeshGenGrid, placed after the cube (vertices 0-7) and
-    // the pyramid (8-12): 20 x 20 units, 21 x 21 vertices = 20 x 20 cells.
+    // ------------------------------------------------------------------
+    // 7. Every shape into one builder (scratch memory), each one's submesh
+    //    kept under its shape_id.  Adding a shape is one Add line here and
+    //    one DrawShape line in RendererRender.
+    // ------------------------------------------------------------------
+    shape_builder Builder = BeginShapes(Scratch, SHAPE_MAX_VERTICES, SHAPE_MAX_INDICES);
+    mesh *Mesh = &Renderer->CubeMesh;
+
+    // The hand-written ones: the cube is vertices 0-7 and indices 0-35 of
+    // the arrays above, the pyramid the rest.
+    Mesh->Submeshes[SHAPE_CUBE] = AddShape(&Builder, Positions, Colors, 8, Indices, 36);
+    Mesh->Submeshes[SHAPE_PYRAMID] = AddShape(&Builder, Positions + 8, Colors + 8, 5, Indices + 36, 18);
+
+    // The floor: 120 x 120 units, 21 x 21 vertices = 20 x 20 cells.
     mesh_gen_data Grid = MeshGenGrid(Scratch, 120.0f, 120.0f, 21, 21);
+    Mesh->Submeshes[SHAPE_FLOOR] = AddGeneratedShape(&Builder, &Grid, XMCOLOR(0.3f, 0.3f, 0.3f, 1.0f));
 
-    u32 HandVertexCount = (u32)ArrayCount(Positions);      // 13
-    u32 HandIndexCount = (u32)ArrayCount(Indices);         // 54
-    u32 VertexCount = HandVertexCount + Grid.VertexCount;
-    u32 IndexCount = HandIndexCount + Grid.IndexCount;
+    // A cylinder: radius 1 at the bottom, 0.5 at the top, 3 tall, 20 slices
+    // around, 4 stacks up.
+    mesh_gen_data Cylinder = MeshGenCylinder(Scratch, 1.0f, 0.5f, 3.0f, 20, 4);
+    Mesh->Submeshes[SHAPE_CYLINDER] = AddGeneratedShape(&Builder, &Cylinder, XMCOLOR(1.0f, 0.5f, 0.0f, 1.0f));
 
-    // Room for all of it, in scratch memory - only needed until the upload.
-    VPosData *AllPositions = PushArray(Scratch, VertexCount, VPosData);
-    VColorData *AllColors = PushArray(Scratch, VertexCount, VColorData);
-    u16 *AllIndices = PushArray(Scratch, IndexCount, u16);
-
-    // The hand-written cube and pyramid first...
-    memcpy(AllPositions, Positions, sizeof(Positions));
-    memcpy(AllColors, Colors, sizeof(Colors));
-    memcpy(AllIndices, Indices, sizeof(Indices));
-
-    // ...then the grid, converted to clash's two vertex buffers: its position,
-    // and a grey colour (mesh_gen_vertex has no colour of its own).
-    for(u32 VertexIndex = 0; VertexIndex < Grid.VertexCount; ++VertexIndex)
-    {
-        AllPositions[HandVertexCount + VertexIndex].Pos = Grid.Vertices[VertexIndex].Position;
-        AllColors[HandVertexCount + VertexIndex].Color = XMCOLOR(0.3f, 0.3f, 0.3f, 1.0f);
-    }
-    memcpy(AllIndices + HandIndexCount, Grid.Indices, Grid.IndexCount*sizeof(u16));
+    Mesh->SubmeshCount = SHAPE_COUNT;
 
     // Upload positions, colours and indices to VRAM.
-    mesh *Mesh = &Renderer->CubeMesh;
-    if(!CreateStaticBuffer(Renderer, Thread, Memory, AllPositions, VertexCount*sizeof(VPosData), &Mesh->VertexBuffers[0]) ||
-       !CreateStaticBuffer(Renderer, Thread, Memory, AllColors, VertexCount*sizeof(VColorData), &Mesh->VertexBuffers[1]) ||
-       !CreateStaticBuffer(Renderer, Thread, Memory, AllIndices, IndexCount*sizeof(u16), &Mesh->IndexBuffer))
+    u32 VertexCount = Builder.VertexCount;
+    u32 IndexCount = Builder.IndexCount;
+    if(!CreateStaticBuffer(Renderer, Thread, Memory, Builder.Positions, VertexCount*sizeof(VPosData), &Mesh->VertexBuffers[0]) ||
+       !CreateStaticBuffer(Renderer, Thread, Memory, Builder.Colors, VertexCount*sizeof(VColorData), &Mesh->VertexBuffers[1]) ||
+       !CreateStaticBuffer(Renderer, Thread, Memory, Builder.Indices, IndexCount*sizeof(u16), &Mesh->IndexBuffer))
     {
         return(false);
     }
 
     // Vertex views: address, total size, and stride (bytes per vertex) of each buffer.
-    // The sizes are the COMBINED arrays' - sizeof(Positions) would only cover
-    // the hand-written 13 vertices, and the GPU would never see the grid.
+    // The sizes are the builder's totals - every shape's vertices.
     // Slot 0: positions, 12 bytes each.
     Mesh->VertexViews[0].BufferLocation = Mesh->VertexBuffers[0]->GetGPUVirtualAddress();
     Mesh->VertexViews[0].SizeInBytes = VertexCount*(UINT)sizeof(VPosData);
@@ -949,29 +1040,16 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     Mesh->IndexView.SizeInBytes = IndexCount*(UINT)sizeof(u16);
     Mesh->IndexView.Format = DXGI_FORMAT_R16_UINT;
 
-    // Three shapes in the one buffer pair: where each one's indices start,
-    // and where its vertices start (added to each of its indices).
-    Mesh->SubmeshCount = 3;
-    Mesh->Submeshes[0].IndexCount = 36;                     // cube
-    Mesh->Submeshes[0].StartIndex = 0;
-    Mesh->Submeshes[0].BaseVertex = 0;
-    Mesh->Submeshes[1].IndexCount = 18;                     // pyramid
-    Mesh->Submeshes[1].StartIndex = 36;
-    Mesh->Submeshes[1].BaseVertex = 8;
-    Mesh->Submeshes[2].IndexCount = Grid.IndexCount;        // floor: after the cube and pyramid
-    Mesh->Submeshes[2].StartIndex = HandIndexCount;
-    Mesh->Submeshes[2].BaseVertex = (i32)HandVertexCount;
-
     // Everything pushed on Scratch above is on the GPU now.
     ResetArena(Scratch);
 
     // ------------------------------------------------------------------
-    // 7. Constant buffer: two 256-byte slots (World, ViewProj) in an UPLOAD
-    //    heap because the CPU rewrites them every frame.  Mapped once and
-    //    left mapped, which upload heaps allow.
+    // 8. Constant buffer: 256-byte slots - the pass, then one per object -
+    //    in an UPLOAD heap because the CPU rewrites them every frame.
+    //    Mapped once and left mapped, which upload heaps allow.
     // ------------------------------------------------------------------
     D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
-    D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer((BOX_COUNT + 2)*CONSTANT_BUFFER_SLOT_SIZE);
+    D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer(CONSTANT_BUFFER_SLOT_COUNT*CONSTANT_BUFFER_SLOT_SIZE);
     if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &ConstantDesc,
                                                              D3D12_RESOURCE_STATE_GENERIC_READ, 0,
                                                              IID_PPV_ARGS(&Renderer->ConstantBuffer))))
@@ -1397,6 +1475,28 @@ RendererResize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     }
 }
 
+// Draws one of CubeMesh's shapes at World: writes World to the next free
+// object slot, points b0 at that slot, and draws the shape's part of the
+// buffers.  The pipeline, b1 and the buffers must already be set.
+internal void
+DrawShape(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World)
+{
+    Assert(Renderer->ObjectSlotsUsed < OBJECT_SLOT_COUNT);
+    u32 Slot = FIRST_OBJECT_SLOT + Renderer->ObjectSlotsUsed++;
+
+    // Transposed because HLSL reads constant-buffer matrices column by column.
+    object_constants Object;
+    XMStoreFloat4x4(&Object.World, XMMatrixTranspose(World));
+    memcpy(Renderer->ConstantBufferMapped + Slot*CONSTANT_BUFFER_SLOT_SIZE, &Object, sizeof(Object));
+
+    Renderer->CommandList->SetGraphicsRootConstantBufferView(0,
+            Renderer->ConstantBuffer->GetGPUVirtualAddress() + Slot*CONSTANT_BUFFER_SLOT_SIZE);
+
+    submesh *Part = &Renderer->CubeMesh.Submeshes[Shape];
+    Renderer->CommandList->DrawIndexedInstanced(Part->IndexCount, 1, Part->StartIndex,
+                                                Part->BaseVertex, 0);
+}
+
 // Records and submits one frame: clear, draw the cube, draw ImGui, present.
 // CubeWorld and ViewProj are row-vector matrices from the game.
 internal void
@@ -1460,60 +1560,39 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     // Only if the cube was created successfully.
     if(Renderer->CubePipeline && Renderer->ConstantBufferMapped)
     {
-        // Transpose because HLSL reads constant-buffer matrices column by column.
-        object_constants Object;
+        // The pass: camera and time, into slot 0, read by every draw through b1.
+        // Transposed because HLSL reads constant-buffer matrices column by column.
         pass_constants Pass;
-        // Each box: fill the box with its World, copy it to its own slot.
-        for(u32 BoxIndex = 0; BoxIndex < BOX_COUNT; ++BoxIndex)
-        {
-            XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMLoadFloat4x4(&Worlds[BoxIndex])));
-            memcpy(Renderer->ConstantBufferMapped + BoxIndex*CONSTANT_BUFFER_SLOT_SIZE,
-                    &Object, sizeof(Object));
-        }
-        // The floor: not spinning, just moved down below the boxes, into the
-        // slot after them.
-        XMStoreFloat4x4(&Object.World, XMMatrixTranspose(XMMatrixTranslation(0.0f, -5.0f, 0.0f)));
-        memcpy(Renderer->ConstantBufferMapped + BOX_COUNT*CONSTANT_BUFFER_SLOT_SIZE,
-               &Object, sizeof(Object));
-        // Pass: camera and time, to the last slot, after the boxes and the floor.
         XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
         Pass.gTime = Time;
         Pass.PulseColor = {1.0f,0.0f,0.50f,1.0f};
-        memcpy(Renderer->ConstantBufferMapped + (BOX_COUNT + 1)*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
-        D3D12_GPU_VIRTUAL_ADDRESS Constants = Renderer->ConstantBuffer->GetGPUVirtualAddress();
+        memcpy(Renderer->ConstantBufferMapped + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
 
+        // Set once for every shape: the root signature, b1 at the pass slot,
+        // and the buffers all the shapes live in.
         Renderer->CommandList->SetGraphicsRootSignature(Renderer->CubeRootSignature);
-        Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
-
-        // b1: the pass slot - the same one the pass was just written to.  (b0
-        // is pointed at each object's slot below, before its draw.)
         Renderer->CommandList->SetGraphicsRootConstantBufferView(1,
-                Constants + (BOX_COUNT + 1)*CONSTANT_BUFFER_SLOT_SIZE);
+                Renderer->ConstantBuffer->GetGPUVirtualAddress() + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE);
         // Every 3 indices form one triangle; positions from slot 0, colours from slot 1.
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        mesh *Mesh = &Renderer->CubeMesh;
-        Renderer->CommandList->IASetVertexBuffers(0, 2, Mesh->VertexViews);
-        Renderer->CommandList->IASetIndexBuffer(&Mesh->IndexView);
+        Renderer->CommandList->IASetVertexBuffers(0, 2, Renderer->CubeMesh.VertexViews);
+        Renderer->CommandList->IASetIndexBuffer(&Renderer->CubeMesh.IndexView);
 
-        submesh *Box = &Mesh->Submeshes[0];
+        // A new frame: every object slot is free again.
+        Renderer->ObjectSlotsUsed = 0;
+
+        // Wobbling and pulsing: the boxes.
+        Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
         for(u32 BoxIndex = 0; BoxIndex < BOX_COUNT; ++BoxIndex)
         {
-            Renderer->CommandList->SetGraphicsRootConstantBufferView(0,
-                    Constants + BoxIndex*CONSTANT_BUFFER_SLOT_SIZE);
-            Renderer->CommandList->DrawIndexedInstanced(Box->IndexCount, 1, Box->StartIndex,
-                    Box->BaseVertex, 0);
+            DrawShape(Renderer, SHAPE_CUBE, XMLoadFloat4x4(&Worlds[BoxIndex]));
         }
 
-        // The floor: its own pipeline (floor.hlsl - still and plain), b0 to
-        // its World slot, then the grid's part of the buffers.  The root
-        // signature, b1, and the vertex and index buffers stay as they are -
-        // both pipelines share them.
-        submesh *Floor = &Mesh->Submeshes[2];
+        // Still: the floor, below the boxes, and the cylinder standing on it
+        // to their right (3 tall and centred, so its middle is 1.5 above -5).
         Renderer->CommandList->SetPipelineState(Renderer->FloorPipeline);
-        Renderer->CommandList->SetGraphicsRootConstantBufferView(0,
-                Constants + BOX_COUNT*CONSTANT_BUFFER_SLOT_SIZE);
-        Renderer->CommandList->DrawIndexedInstanced(Floor->IndexCount, 1, Floor->StartIndex,
-                                                    Floor->BaseVertex, 0);
+        DrawShape(Renderer, SHAPE_FLOOR, XMMatrixTranslation(0.0f, -5.0f, 0.0f));
+        DrawShape(Renderer, SHAPE_CYLINDER, XMMatrixTranslation(7.0f, -3.5f, 0.0f));
     }
 
     // ImGui last, so it's drawn on top.  Bind the shader-visible heap because
