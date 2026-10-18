@@ -32,6 +32,7 @@ vertex_out VS(vertex_in In)
 {
     vertex_out Out;
 
+    // The wobble.
     In.Position.xy += 0.5f*sin(In.Position.x)*sin(3.0f*gTime);
     In.Position.z *= 0.6f + 0.4f*sin(2.0f*gTime);
 

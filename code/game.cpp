@@ -35,7 +35,7 @@
   it is kept out of the block that input playback copies back.
 */
 internal dx12_renderer *
-GetRenderer(thread_context *Thread, game_memory *Memory, game_input *Input)
+GetRenderer(thread_context *Thread, game_memory *Memory, game_input *Input, memory_arena *Scratch)
 {
     Assert(sizeof(dx12_renderer) <= Memory->RendererStorageSize);
     dx12_renderer *Renderer = (dx12_renderer *)Memory->RendererStorage;
@@ -43,7 +43,7 @@ GetRenderer(thread_context *Thread, game_memory *Memory, game_input *Input)
     if(!Renderer->IsInitialized)
     {
         if(RendererInitialize(Renderer, Thread, Memory, (HWND)Memory->PlatformWindow,
-                              Input->WindowWidth, Input->WindowHeight))
+                              Input->WindowWidth, Input->WindowHeight, Scratch))
         {
             Renderer->IsInitialized = true;
         }
@@ -85,7 +85,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         // 5 units back from the origin, looking at it - down +Z.  Far
         // enough that the whole spinning cube fits: its corners reach 1.73
         // from its centre.
-        CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, -5.0f));
+        CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, -20.0f));
 
         // Music is optional.  Asked about first, so a project without a
         // music file does not log an error on every start.
@@ -102,7 +102,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     // The renderer first, so Dear ImGui can start its frame before the
     // camera reads the mouse - the camera has to know whether ImGui wants it.
-    dx12_renderer *Renderer = GetRenderer(Thread, Memory, Input);
+    dx12_renderer *Renderer = GetRenderer(Thread, Memory, Input, &State->TransientArena);
     State->Renderer = Renderer;
     if(Renderer)
     {
