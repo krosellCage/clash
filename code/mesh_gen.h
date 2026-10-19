@@ -9,6 +9,7 @@
 #include "arena.h"                 // memory_arena, PushArray - and base.h: u16, u32, r32, Assert
 #include "game_directx_math.h"     // XMFLOAT2, XMFLOAT3 (and "using namespace DirectX")
 #include <string.h>                // memcpy, in MeshGenAppend
+#include <math.h> 
 
 struct mesh_gen_vertex
 {
@@ -239,6 +240,155 @@ MeshGenCylinder(memory_arena *Arena, r32 BottomRadius, r32 TopRadius,
     Assert(VertexAt == Result.VertexCount);
     Assert(IndexAt == Result.IndexCount);
     return(Result);
+}
+
+internal mesh_gen_vertex
+MeshGenMidPoint(mesh_gen_vertex *A, mesh_gen_vertex *B)
+{
+    XMVECTOR Position = 0.5f*(XMLoadFloat3(&A->Position) + XMLoadFloat3(&B->Position));
+    XMVECTOR Normal = XMVector3Normalize(0.5f*(XMLoadFloat3(&A->Normal) + XMLoadFloat3(&B->Normal)));
+    XMVECTOR TangentU =XMVector3Normalize(0.5f*(XMLoadFloat3(&A->TangentU) + XMLoadFloat3(&B->TangentU)));
+    XMVECTOR TexC = 0.5f*(XMLoadFloat2(&A->TexC) + XMLoadFloat2(&B->TexC));
+
+    mesh_gen_vertex Result;
+    XMStoreFloat3(&Result.Position, Position);
+    XMStoreFloat3(&Result.Normal, Normal);
+    XMStoreFloat3(&Result.TangentU, TangentU);
+    XMStoreFloat2(&Result.TexC, TexC);
+
+    return(Result);
+}
+
+internal mesh_gen_data
+MeshGenSubdivide(memory_arena *Arena, mesh_gen_data *Input)
+{
+    u32 TriangleCount = Input->IndexCount / 3;
+
+    mesh_gen_data Result = {};
+    Result.VertexCount = TriangleCount * 6;
+    Result.IndexCount = TriangleCount * 12;
+    Assert(Result.VertexCount <= 65536);
+    Result.Vertices = PushArray(Arena, Result.VertexCount, mesh_gen_vertex);
+    Result.Indices = PushArray(Arena, Result.IndexCount, u16);
+
+    for(u32 Triangle = 0; Triangle < TriangleCount; ++Triangle)
+    {
+        mesh_gen_vertex *V0 = &Input->Vertices[Input->Indices[Triangle*3 + 0]];
+        mesh_gen_vertex *V1 = &Input->Vertices[Input->Indices[Triangle*3 + 1]];
+        mesh_gen_vertex *V2 = &Input->Vertices[Input->Indices[Triangle*3 + 2]];
+
+        mesh_gen_vertex M0 = MeshGenMidPoint(V0, V1);
+        mesh_gen_vertex M1 = MeshGenMidPoint(V1, V2);
+        mesh_gen_vertex M2 = MeshGenMidPoint(V0, V2);
+
+        Result.Vertices[Triangle*6 + 0] = *V0;
+        Result.Vertices[Triangle*6 + 1] = *V1;
+        Result.Vertices[Triangle*6 + 2] = *V2;
+        Result.Vertices[Triangle*6 + 3] = M0;
+        Result.Vertices[Triangle*6 + 4] = M1;
+        Result.Vertices[Triangle*6 + 5] = M2;
+
+        u32 First = Triangle*6;
+
+        Result.Indices[Triangle*12 + 0]  = (u16)(First + 0);     // bottom-left
+        Result.Indices[Triangle*12 + 1]  = (u16)(First + 3);
+        Result.Indices[Triangle*12 + 2]  = (u16)(First + 5);
+
+        Result.Indices[Triangle*12 + 3]  = (u16)(First + 3);     // middle
+        Result.Indices[Triangle*12 + 4]  = (u16)(First + 4);
+        Result.Indices[Triangle*12 + 5]  = (u16)(First + 5);
+
+        Result.Indices[Triangle*12 + 6]  = (u16)(First + 5);     // bottom-right
+        Result.Indices[Triangle*12 + 7]  = (u16)(First + 4);
+        Result.Indices[Triangle*12 + 8]  = (u16)(First + 2);
+
+        Result.Indices[Triangle*12 + 9]  = (u16)(First + 3);     // top
+        Result.Indices[Triangle*12 + 10] = (u16)(First + 1);
+        Result.Indices[Triangle*12 + 11] = (u16)(First + 4);
+    }
+
+    return(Result);
+}
+
+internal mesh_gen_data
+MeshGenGeosphere(memory_arena *Arena, r32 Radius, u32 SubdivisionCount)
+{
+    // An icosahedron: 12 vertices, 20 equal triangles - the roundest shape
+    // made of equal triangles.  X and Z put its corners at distance 1 from
+    // the centre.
+    r32 X = 0.525731f;
+    r32 Z = 0.850651f;
+
+    XMFLOAT3 Positions[12] =
+    {
+        XMFLOAT3(-X, 0.0f, Z),  XMFLOAT3(X, 0.0f, Z),
+        XMFLOAT3(-X, 0.0f, -Z), XMFLOAT3(X, 0.0f, -Z),
+        XMFLOAT3(0.0f, Z, X),   XMFLOAT3(0.0f, Z, -X),
+        XMFLOAT3(0.0f, -Z, X),  XMFLOAT3(0.0f, -Z, -X),
+        XMFLOAT3(Z, X, 0.0f),   XMFLOAT3(-Z, X, 0.0f),
+        XMFLOAT3(Z, -X, 0.0f),  XMFLOAT3(-Z, -X, 0.0f),
+    };
+
+    u16 Indices[60] =
+    {
+        1,4,0,   4,9,0,   4,5,9,   8,5,4,   1,8,4,
+        1,10,8,  10,3,8,  8,3,5,   3,2,5,   3,7,2,
+        3,10,7,  10,6,7,  6,11,7,  6,0,11,  6,1,0,
+        10,1,6,  11,0,9,  2,11,9,  5,2,9,   11,2,7,
+    };
+
+    mesh_gen_data Result = {};
+    Result.VertexCount = 12;          // how many positions?
+    Result.IndexCount = 60;           // how many indices?
+    Result.Vertices = PushArray(Arena, Result.VertexCount, mesh_gen_vertex);
+    Result.Indices = PushArray(Arena, Result.IndexCount, u16);
+
+    for(u32 Index = 0; Index < 12; ++Index)
+    {
+        Result.Vertices[Index] = {};
+        Result.Vertices[Index].Position = Positions[Index];
+    }
+
+    memcpy(Result.Indices, Indices, sizeof(Indices));
+
+    if(SubdivisionCount > 5)
+    {
+        SubdivisionCount = 5;
+    }
+
+    for(u32 Subdivision = 0; Subdivision < SubdivisionCount; ++Subdivision)
+    {
+        Result = MeshGenSubdivide(Arena, &Result);
+    }
+
+    for(u32 Vertex = 0; Vertex < Result.VertexCount; Vertex++)
+    {
+        XMVECTOR Direction = XMVector3Normalize(XMLoadFloat3(&Result.Vertices[Vertex].Position));
+        XMStoreFloat3(&Result.Vertices[Vertex].Position, Radius*Direction);   // Radius × Direction
+        XMStoreFloat3(&Result.Vertices[Vertex].Normal, Direction);     // just Direction
+
+        // Texture coordinates from the point's two angles on the sphere:
+        // Theta around the y axis (0..2pi), Phi down from the top (0..pi).
+        XMFLOAT3 *P = &Result.Vertices[Vertex].Position;
+        r32 Theta = atan2f(P->z, P->x);
+        if(Theta < 0.0f)
+        {
+            Theta += XM_2PI;
+        }
+        r32 Phi = XMScalarACos(P->y / Radius);
+        Result.Vertices[Vertex].TexC = XMFLOAT2(Theta / XM_2PI, Phi / XM_PI);
+
+        // TangentU: the direction Theta grows in - around the y axis.
+        XMVECTOR Tangent = XMVectorSet(-sinf(Phi)*sinf(Theta), 0.0f, sinf(Phi)*cosf(Theta), 0.0f);
+        XMStoreFloat3(&Result.Vertices[Vertex].TangentU, XMVector3Normalize(Tangent));
+    }
+    return(Result);
+}
+
+internal r32
+HillsHeight(r32 X, r32 Z)
+{
+    return(0.3f*( Z*sinf(0.1f*X) + X*cosf(0.1f*Z)));
 }
 
 // Room for several shapes, filled by MeshGenAppend.

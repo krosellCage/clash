@@ -180,9 +180,34 @@ enum shape_id
     SHAPE_FLOOR,
     SHAPE_CYLINDER,
     SHAPE_CONE,
+    SHAPE_GEOSPHERE,
+    SHAPE_LAND,
 
     SHAPE_COUNT
 };
+
+// Render items (Luna 7.6.2): the scene as a list - one entry per object to
+// draw, saying which shape, where, and which layer.  Built once by
+// BuildRenderItems; drawn every frame by DrawRenderItems.
+//
+// A layer is a group of items drawn with the same pipeline, so the
+// pipeline is set once per layer instead of once per item.
+enum render_layer
+{
+    RENDER_LAYER_ANIMATED,     // CubePipeline: wobble and pulse
+    RENDER_LAYER_STILL,        // FloorPipeline: still and plain
+
+    RENDER_LAYER_COUNT
+};
+
+struct render_item
+{
+    shape_id Shape;            // which part of CubeMesh: its submesh
+    XMFLOAT4X4 World;          // where it is - XMFLOAT4X4 to store, XMMATRIX to calculate
+    render_layer Layer;        // which pipeline draws it
+};
+
+#define MAX_RENDER_ITEMS 256
 
 // Collects shapes into one set of arrays, so they all go to the GPU as one
 // pair of vertex buffers and one index buffer.  Each Add copies a shape onto
@@ -333,6 +358,13 @@ struct dx12_renderer
     frame_resource Frames[FRAME_RESOURCE_COUNT];
     u32 FrameIndex;
     u32 ObjectSlotsUsed;            // this frame's, so far - DrawShape takes the next one
+
+    // The scene: everything to draw, filled once by BuildRenderItems.  The
+    // boxes are BOX_COUNT items from FirstBoxItem on - their World comes
+    // from the game, every frame.
+    render_item RenderItems[MAX_RENDER_ITEMS];
+    u32 RenderItemCount;
+    u32 FirstBoxItem;
 
     // ImGui's state; 0 when not running.  Created after each game.dll load,
     // destroyed in GameUnload.
@@ -1043,6 +1075,46 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     Mesh->Submeshes[SHAPE_CONE] = AddGeneratedShape(&Builder, &Cone, XMCOLOR(1.0f, 0.0f, 0.0f, 1.0f));
     Mesh->SubmeshCount = SHAPE_COUNT;
 
+    mesh_gen_data Geosphere = MeshGenGeosphere(Scratch, 1.0f, 3);
+    Mesh->Submeshes[SHAPE_GEOSPHERE] = AddGeneratedShape(&Builder, &Geosphere, XMCOLOR(0.0f, 0.6f, 1.0f, 1.0f));
+
+    mesh_gen_data Land = MeshGenGrid(Scratch, 160.0f, 160.0f, 50, 50);
+
+    VPosData *LandPositions = PushArray(Scratch, Land.VertexCount, VPosData);
+    VColorData *LandColors = PushArray(Scratch, Land.VertexCount, VColorData);
+
+    for(u32 Index = 0; Index < Land.VertexCount; ++Index)
+    {
+        LandPositions[Index].Pos = Land.Vertices[Index].Position;
+        LandPositions[Index].Pos.y = HillsHeight(LandPositions[Index].Pos.x, LandPositions[Index].Pos.z);
+
+        r32 Y = LandPositions[Index].Pos.y;
+        if(Y < -10.0f)
+        {
+            LandColors[Index].Color = XMCOLOR(1.0f, 0.96f, 0.62f, 1.0f);     // sandy beach
+        }
+        else if(Y < 5.0f)
+        {
+            LandColors[Index].Color = XMCOLOR(0.48f, 0.77f, 0.46f, 1.0f); // light green
+        }
+        else if(Y < 12.0f)
+        {
+            LandColors[Index].Color = XMCOLOR(0.1f, 0.48f, 0.19f, 1.0f); //dark green
+        }
+        else if(Y < 20.0f)
+        {
+            LandColors[Index].Color = XMCOLOR(0.45f, 0.39f, 0.34f, 1.0f); //brown
+        }
+        else
+        {
+            LandColors[Index].Color = XMCOLOR(1.0f, 1.0f, 1.0f, 1.0f);
+        }
+    }
+
+    Mesh->Submeshes[SHAPE_LAND] = AddShape(&Builder, LandPositions, LandColors, Land.VertexCount,
+                                       Land.Indices, Land.IndexCount);
+
+
     // Upload positions, colours and indices to VRAM.
     u32 VertexCount = Builder.VertexCount;
     u32 IndexCount = Builder.IndexCount;
@@ -1100,6 +1172,56 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     }
 
     return(true);
+}
+
+// Adds one object to the scene: which shape, where, and in which layer.
+// Returns its place in the list, for items that are moved later.
+internal u32
+AddRenderItem(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World, render_layer Layer)
+{
+    Assert(Renderer->RenderItemCount < MAX_RENDER_ITEMS);
+    u32 Result = Renderer->RenderItemCount++;
+
+    render_item *Item = &Renderer->RenderItems[Result];
+    Item->Shape = Shape;
+    XMStoreFloat4x4(&Item->World, World);
+    Item->Layer = Layer;
+
+    return(Result);
+}
+
+// The scene (Luna's BuildRenderItems).  Runs once, at startup - after a
+// change here, restart clash: a hot reload keeps the old list.
+internal void
+BuildRenderItems(dx12_renderer *Renderer)
+{
+    Renderer->RenderItemCount = 0;
+
+    // The 3x3 boxes: placeholders here - RendererRender overwrites their
+    // World every frame with the game's.
+    Renderer->FirstBoxItem = Renderer->RenderItemCount;
+    for(u32 BoxIndex = 0; BoxIndex < BOX_COUNT; ++BoxIndex)
+    {
+        AddRenderItem(Renderer, SHAPE_CUBE, XMMatrixIdentity(), RENDER_LAYER_ANIMATED);
+    }
+
+    // The floor, 5 below the origin.
+    AddRenderItem(Renderer, SHAPE_LAND, XMMatrixTranslation(0.0f, -5.0f, 0.0f), RENDER_LAYER_STILL);
+
+    // A row of 5 cylinders behind the boxes, standing on the floor (3 tall
+    // and centred, so their middle is 1.5 above -5).
+    for(u32 CylinderIndex = 0; CylinderIndex < 5; ++CylinderIndex)
+    {
+        AddRenderItem(Renderer, SHAPE_CYLINDER,
+                      XMMatrixTranslation((r32)CylinderIndex*3.0f - 6.0f, -3.5f, 9.0f),
+                      RENDER_LAYER_STILL);
+    }
+
+    // In front of the boxes: the pyramid and the cone on the floor, the
+    // geosphere above the cone.
+    AddRenderItem(Renderer, SHAPE_PYRAMID, XMMatrixTranslation(0.0f, -4.0f, -10.0f), RENDER_LAYER_STILL);
+    AddRenderItem(Renderer, SHAPE_CONE, XMMatrixTranslation(0.0f, -3.5f, -5.0f), RENDER_LAYER_STILL);
+    AddRenderItem(Renderer, SHAPE_GEOSPHERE, XMMatrixTranslation(0.0f, 3.5f, -5.0f), RENDER_LAYER_STILL);
 }
 
 // Starts DirectX 12 on the given window: device, queue, swap chain, heaps,
@@ -1472,6 +1594,10 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     {
         RendererLog(Thread, Memory, "ERROR: No cube - see the errors above.\n");
     }
+    else
+    {
+        BuildRenderItems(Renderer);
+    }
 
     return(true);
 }
@@ -1554,6 +1680,20 @@ DrawShape(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World)
             Frame->ConstantBuffer->GetGPUVirtualAddress() + Slot * CONSTANT_BUFFER_SLOT_SIZE);
     submesh *Part = &Renderer->CubeMesh.Submeshes[Shape];
     Renderer->CommandList->DrawIndexedInstanced(Part->IndexCount, 1, Part->StartIndex, Part->BaseVertex, 0);
+}
+
+// Draws every render item in Layer.  The layer's pipeline must already be set.
+internal void
+DrawRenderItems(dx12_renderer *Renderer, render_layer Layer)
+{
+    for(u32 ItemIndex = 0; ItemIndex < Renderer->RenderItemCount; ++ItemIndex)
+    {
+        render_item *Item = &Renderer->RenderItems[ItemIndex];
+        if(Item->Layer == Layer)
+        {
+            DrawShape(Renderer, Item->Shape, XMLoadFloat4x4(&Item->World));
+        }
+    }
 }
 
 // Records and submits one frame: clear, draw the cube, draw ImGui, present.
@@ -1650,23 +1790,20 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         // A new frame: every object slot is free again.
         Renderer->ObjectSlotsUsed = 0;
 
-        // Wobbling and pulsing: the boxes.
-        Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
+        // The boxes spin, so their World changes every frame: copy the
+        // game's into their render items (Luna does this in UpdateObjectCBs).
         for(u32 BoxIndex = 0; BoxIndex < BOX_COUNT; ++BoxIndex)
         {
-            DrawShape(Renderer, SHAPE_CUBE, XMLoadFloat4x4(&Worlds[BoxIndex]));
+            Renderer->RenderItems[Renderer->FirstBoxItem + BoxIndex].World = Worlds[BoxIndex];
         }
 
-        // Still: the floor, below the boxes, and the cylinder standing on it
+        // Then the whole list, one layer at a time: its pipeline once, then
+        // every item in it.
+        Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
+        DrawRenderItems(Renderer, RENDER_LAYER_ANIMATED);
+
         Renderer->CommandList->SetPipelineState(Renderer->FloorPipeline);
-        DrawShape(Renderer, SHAPE_FLOOR, XMMatrixTranslation(0.0f, -5.0f, 0.0f));
-        for(u32 i = 0; i < 5; i++ )
-        {
-            DrawShape(Renderer, SHAPE_CYLINDER, XMMatrixTranslation(((r32)i * 3.0f) - 6.0f, -3.5f, 9.0f));
-        }
-
-        DrawShape(Renderer, SHAPE_PYRAMID, XMMatrixTranslation(0.0f, -4.0f, -10.0f));
-        DrawShape(Renderer, SHAPE_CONE, XMMatrixTranslation(0.0f, -3.5f, -5.0f));
+        DrawRenderItems(Renderer, RENDER_LAYER_STILL);
     }
 
     // ImGui last, so it's drawn on top.  Bind the shader-visible heap because
