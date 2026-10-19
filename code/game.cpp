@@ -14,6 +14,7 @@
 #include "game.h"
 
 #include <stdio.h>      // snprintf, for the debug log line
+#include <stdlib.h>
 
 #include "dx12_renderer.cpp"
 
@@ -87,6 +88,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         // from its centre.
         CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, -20.0f));
 
+        WavesInitialize(&State->Waves, &State->WorldArena, 128, 128, 1.0f, 0.03f, 4.0f, 0.2f);
         // Music is optional.  Asked about first, so a project without a
         // music file does not log an error on every start.
         const char *MusicFileName = "data\\music.wav";
@@ -236,9 +238,19 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         }
     }
 
+    if(State->TimeSeconds >= State->NextWaveDisturbTime)
+    {
+        State->NextWaveDisturbTime = State->TimeSeconds + 0.25;
+        u32 Row = 4 + rand() % (State->Waves.RowCount - 8);
+        u32 Column = 4 + rand() % (State->Waves.ColumnCount - 8);
+        r32 Magnitude = 0.3f + 0.3f*((r32)rand() / (r32)RAND_MAX);
+        WavesDisturb(&State->Waves, Row, Column, Magnitude);
+    }
+    WavesUpdate(&State->Waves, Input->dtForFrame);
+
     XMFLOAT4X4 ViewProj;
     XMStoreFloat4x4(&ViewProj, View * Projection);
-    RendererRender(Renderer, Thread, Memory, Input, Worlds, &ViewProj, Time);
+    RendererRender(Renderer, Thread, Memory, Input, Worlds, &ViewProj, Time, &State->Waves);
 }
 
 extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)

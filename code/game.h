@@ -12,7 +12,7 @@
 #include "game_directx_math.h"      // Luna's maths, and the bridge to ours
 #include "game_camera.h"
 #include "game_sound.h"
-
+#include "game_waves.h"
 // Declared, never defined here - see the Renderer member below.
 struct dx12_renderer;
 
@@ -58,6 +58,9 @@ struct game_state
 
     // All of TransientStorage.  Scratch: reset before each use.
     memory_arena TransientArena;
+
+    waves Waves;
+    r64 NextWaveDisturbTime;
 };
 
 #define GAME_H

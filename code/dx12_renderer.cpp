@@ -106,6 +106,14 @@ struct frame_resource
     ID3D12Resource *ConstantBuffer;
     u8 *ConstantBufferMapped;
 
+    // The water's positions (vertex slot 0) - a dynamic vertex buffer (Luna
+    // 7.7.4).  Rewritten by the CPU every frame, so it lives where the
+    // constant buffer does and for the same reasons: an UPLOAD heap, mapped
+    // for good, and one per frame resource so the CPU never writes the
+    // positions an earlier frame's draw is still reading.
+    ID3D12Resource *WavesPositionBuffer;
+    XMFLOAT3 *WavesPositionsMapped;     // the same 12 bytes per vertex as VPosData
+
     // The fence value signalled after this frame's commands: once the GPU's
     // fence has reached it, this frame resource is free to reuse.  0 = never
     // used yet, so nothing to wait for.
@@ -202,7 +210,8 @@ enum render_layer
 
 struct render_item
 {
-    shape_id Shape;            // which part of CubeMesh: its submesh
+    mesh *Mesh;                // whose buffers: CubeMesh or WavesMesh (Luna's Geo)
+    u32 Submesh;               // which part of them - for CubeMesh, a shape_id
     XMFLOAT4X4 World;          // where it is - XMFLOAT4X4 to store, XMMATRIX to calculate
     render_layer Layer;        // which pipeline draws it
 };
@@ -352,7 +361,8 @@ struct dx12_renderer
     ID3D12PipelineState *CubePipeline;
     ID3D12PipelineState *FloorPipeline;     // same root signature, floor.hlsl: no wobble, no pulse
     mesh CubeMesh;
-
+    mesh WavesMesh;     // the water: static colours and indices, positions per frame resource
+    u32 WavesVertexCount;
     // One set of per-frame things for each frame in flight, used in turn.
     // FrameIndex is the one the frame being recorded uses.
     frame_resource Frames[FRAME_RESOURCE_COUNT];
@@ -1114,7 +1124,13 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     Mesh->Submeshes[SHAPE_LAND] = AddShape(&Builder, LandPositions, LandColors, Land.VertexCount,
                                        Land.Indices, Land.IndexCount);
 
+    mesh_gen_data Water = MeshGenGrid(Scratch, 127.0f, 127.0f, 128, 128);
+    VColorData *WaterColors = PushArray(Scratch, Water.VertexCount, VColorData);
 
+    for(u32 Index = 0; Index < Water.VertexCount; ++Index)
+    {
+        WaterColors[Index].Color = XMCOLOR(0.0f, 0.3f, 0.8f, 1.0f);
+    }
     // Upload positions, colours and indices to VRAM.
     u32 VertexCount = Builder.VertexCount;
     u32 IndexCount = Builder.IndexCount;
@@ -1141,6 +1157,36 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     Mesh->IndexView.BufferLocation = Mesh->IndexBuffer->GetGPUVirtualAddress();
     Mesh->IndexView.SizeInBytes = IndexCount*(UINT)sizeof(u16);
     Mesh->IndexView.Format = DXGI_FORMAT_R16_UINT;
+
+    // The water's static parts: its colours (slot 1) and its indices, both
+    // fixed.  Its positions (slot 0) change every frame - they live in the
+    // frame resources instead.
+    mesh *WavesMesh = &Renderer->WavesMesh;
+    if(!CreateStaticBuffer(Renderer, Thread, Memory, WaterColors, Water.VertexCount*sizeof(VColorData), &WavesMesh->VertexBuffers[1]) ||
+       !CreateStaticBuffer(Renderer, Thread, Memory, Water.Indices, Water.IndexCount*sizeof(u16), &WavesMesh->IndexBuffer))
+    {
+        return(false);
+    }
+
+    // Slot 1: colours, 4 bytes each.
+    WavesMesh->VertexViews[1].BufferLocation = WavesMesh->VertexBuffers[1]->GetGPUVirtualAddress();
+    WavesMesh->VertexViews[1].SizeInBytes = Water.VertexCount*(UINT)sizeof(VColorData);
+    WavesMesh->VertexViews[1].StrideInBytes = (UINT)sizeof(VColorData);
+
+    // Indices: 16-bit, like the cube's.
+    WavesMesh->IndexView.BufferLocation = WavesMesh->IndexBuffer->GetGPUVirtualAddress();
+    WavesMesh->IndexView.SizeInBytes = Water.IndexCount*(UINT)sizeof(u16);
+    WavesMesh->IndexView.Format = DXGI_FORMAT_R16_UINT;
+
+    // Kept for the per-frame position buffers, made below with the
+    // constant buffers.
+    Renderer->WavesVertexCount = Water.VertexCount;
+
+    // One part: the whole grid.
+    WavesMesh->SubmeshCount = 1;
+    WavesMesh->Submeshes[0].IndexCount = Water.IndexCount;
+    WavesMesh->Submeshes[0].StartIndex = 0;
+    WavesMesh->Submeshes[0].BaseVertex = 0;
 
     // Everything pushed on Scratch above is on the GPU now.
     ResetArena(Scratch);
@@ -1169,24 +1215,45 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
         {
             return(false);
         }
+
+        // The water's positions: made and mapped the same way, sized for
+        // every water vertex.
+        D3D12_RESOURCE_DESC WavesDesc = DescribeBuffer(Renderer->WavesVertexCount*sizeof(XMFLOAT3));
+        if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &WavesDesc,
+                                                                 D3D12_RESOURCE_STATE_GENERIC_READ, 0,
+                                                                 IID_PPV_ARGS(&Frame->WavesPositionBuffer))) ||
+           DX12_FAILED(Frame->WavesPositionBuffer->Map(0, &NoRead, (void **)&Frame->WavesPositionsMapped)))
+        {
+            return(false);
+        }
     }
 
     return(true);
 }
 
-// Adds one object to the scene: which shape, where, and in which layer.
-// Returns its place in the list, for items that are moved later.
+// Adds one object to the scene: whose buffers, which part of them, where,
+// and in which layer.  Returns its place in the list, for items that are
+// moved later.
 internal u32
-AddRenderItem(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World, render_layer Layer)
+AddMeshRenderItem(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX World, render_layer Layer)
 {
     Assert(Renderer->RenderItemCount < MAX_RENDER_ITEMS);
     u32 Result = Renderer->RenderItemCount++;
 
     render_item *Item = &Renderer->RenderItems[Result];
-    Item->Shape = Shape;
+    Item->Mesh = Mesh;
+    Item->Submesh = Submesh;
     XMStoreFloat4x4(&Item->World, World);
     Item->Layer = Layer;
 
+    return(Result);
+}
+
+// The same, for one of CubeMesh's shapes - most of the scene.
+internal u32
+AddRenderItem(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World, render_layer Layer)
+{
+    u32 Result = AddMeshRenderItem(Renderer, &Renderer->CubeMesh, Shape, World, Layer);
     return(Result);
 }
 
@@ -1207,6 +1274,11 @@ BuildRenderItems(dx12_renderer *Renderer)
 
     // The floor, 5 below the origin.
     AddRenderItem(Renderer, SHAPE_LAND, XMMatrixTranslation(0.0f, -5.0f, 0.0f), RENDER_LAYER_STILL);
+
+    // The water, at the same height as the land, so it fills the valleys.
+    // Its own mesh - WavesMesh, part 0 - since its positions change.
+    AddMeshRenderItem(Renderer, &Renderer->WavesMesh, 0, XMMatrixTranslation(0.0f, -5.0f, 0.0f),
+                      RENDER_LAYER_STILL);
 
     // A row of 5 cylinders behind the boxes, standing on the floor (3 tall
     // and centred, so their middle is 1.5 above -5).
@@ -1661,12 +1733,12 @@ WaitForFence(dx12_renderer *Renderer, u64 Value)
     }
 }
 
-// Draws one of CubeMesh's shapes at World: writes World to the next free
-// object slot of this frame's constant buffer, points b0 at that slot, and
-// draws the shape's part of the buffers.  The pipeline, b1 and the buffers
-// must already be set.
+// Draws part Submesh of Mesh at World: writes World to the next free object
+// slot of this frame's constant buffer, points b0 at that slot, and draws
+// that part of the buffers.  The pipeline, b1 and Mesh's buffers must
+// already be set.
 internal void
-DrawShape(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World)
+DrawShape(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX World)
 {
     Assert(Renderer->ObjectSlotsUsed < OBJECT_SLOT_COUNT);
     u32 Slot = FIRST_OBJECT_SLOT + Renderer->ObjectSlotsUsed++;
@@ -1678,20 +1750,29 @@ DrawShape(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World)
            &Object, sizeof(Object));
     Renderer->CommandList->SetGraphicsRootConstantBufferView(0,
             Frame->ConstantBuffer->GetGPUVirtualAddress() + Slot * CONSTANT_BUFFER_SLOT_SIZE);
-    submesh *Part = &Renderer->CubeMesh.Submeshes[Shape];
+    submesh *Part = &Mesh->Submeshes[Submesh];
     Renderer->CommandList->DrawIndexedInstanced(Part->IndexCount, 1, Part->StartIndex, Part->BaseVertex, 0);
 }
 
-// Draws every render item in Layer.  The layer's pipeline must already be set.
+// Draws every render item in Layer.  The layer's pipeline must already be
+// set.  Like Luna's DrawRenderItems, each item binds its own mesh's buffers -
+// but only when they differ from the last item's, since most share CubeMesh.
 internal void
 DrawRenderItems(dx12_renderer *Renderer, render_layer Layer)
 {
+    mesh *BoundMesh = 0;
     for(u32 ItemIndex = 0; ItemIndex < Renderer->RenderItemCount; ++ItemIndex)
     {
         render_item *Item = &Renderer->RenderItems[ItemIndex];
         if(Item->Layer == Layer)
         {
-            DrawShape(Renderer, Item->Shape, XMLoadFloat4x4(&Item->World));
+            if(Item->Mesh != BoundMesh)
+            {
+                Renderer->CommandList->IASetVertexBuffers(0, 2, Item->Mesh->VertexViews);
+                Renderer->CommandList->IASetIndexBuffer(&Item->Mesh->IndexView);
+                BoundMesh = Item->Mesh;
+            }
+            DrawShape(Renderer, Item->Mesh, Item->Submesh, XMLoadFloat4x4(&Item->World));
         }
     }
 }
@@ -1700,7 +1781,8 @@ DrawRenderItems(dx12_renderer *Renderer, render_layer Layer)
 // CubeWorld and ViewProj are row-vector matrices from the game.
 internal void
 RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
-               game_input *Input, const XMFLOAT4X4 *Worlds, const XMFLOAT4X4 *ViewProj, r32 Time)
+               game_input *Input, const XMFLOAT4X4 *Worlds, const XMFLOAT4X4 *ViewProj, r32 Time,
+               const waves *Waves)
 {
     if(!Renderer->SwapChain || !Renderer->BackBuffers[0] || !Renderer->DepthBuffer)
     {
@@ -1777,15 +1859,24 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         Pass.PulseColor = {1.0f,0.0f,0.50f,1.0f};
         memcpy(Frame->ConstantBufferMapped + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
 
-        // Set once for every shape: the root signature, b1 at the pass slot,
-        // and the buffers all the shapes live in.
+        // Set once for every shape: the root signature and b1 at the pass
+        // slot.  (The buffers are set per mesh, in DrawRenderItems.)
         Renderer->CommandList->SetGraphicsRootSignature(Renderer->CubeRootSignature);
         Renderer->CommandList->SetGraphicsRootConstantBufferView(1,
                 Frame->ConstantBuffer->GetGPUVirtualAddress() + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE);
         // Every 3 indices form one triangle; positions from slot 0, colours from slot 1.
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        Renderer->CommandList->IASetVertexBuffers(0, 2, Renderer->CubeMesh.VertexViews);
-        Renderer->CommandList->IASetIndexBuffer(&Renderer->CubeMesh.IndexView);
+
+        // The water (Luna's UpdateWaves): copy this frame's wave positions
+        // into this frame resource's position buffer, then point the water's
+        // slot 0 at that buffer - a different one each frame, in turn.
+        Assert(Waves->VertexCount == Renderer->WavesVertexCount);
+        memcpy(Frame->WavesPositionsMapped, Waves->Current, Waves->VertexCount*sizeof(XMFLOAT3));
+
+        D3D12_VERTEX_BUFFER_VIEW *WavesPositions = &Renderer->WavesMesh.VertexViews[0];
+        WavesPositions->BufferLocation = Frame->WavesPositionBuffer->GetGPUVirtualAddress();
+        WavesPositions->SizeInBytes = Renderer->WavesVertexCount*(UINT)sizeof(XMFLOAT3);
+        WavesPositions->StrideInBytes = (UINT)sizeof(XMFLOAT3);
 
         // A new frame: every object slot is free again.
         Renderer->ObjectSlotsUsed = 0;
@@ -1910,10 +2001,18 @@ RendererShutdown(dx12_renderer *Renderer)
             Frame->ConstantBufferMapped = 0;
         }
         ReleaseAndZero(Frame->ConstantBuffer);
+        if(Frame->WavesPositionBuffer && Frame->WavesPositionsMapped)
+        {
+            Frame->WavesPositionBuffer->Unmap(0, 0);
+            Frame->WavesPositionsMapped = 0;
+        }
+        ReleaseAndZero(Frame->WavesPositionBuffer);
     }
     ReleaseAndZero(Renderer->CubeMesh.IndexBuffer);
     ReleaseAndZero(Renderer->CubeMesh.VertexBuffers[0]);
     ReleaseAndZero(Renderer->CubeMesh.VertexBuffers[1]);
+    ReleaseAndZero(Renderer->WavesMesh.IndexBuffer);
+    ReleaseAndZero(Renderer->WavesMesh.VertexBuffers[1]);
     ReleaseAndZero(Renderer->FloorPipeline);
     ReleaseAndZero(Renderer->CubePipeline);
     ReleaseAndZero(Renderer->CubeRootSignature);
