@@ -148,5 +148,15 @@ XMStoreMat4(FXMMATRIX M)
     return(Result);
 }
 
+XMVECTOR ComputeNormal(FXMVECTOR p0,
+        FXMVECTOR p1,
+        FXMVECTOR p2)
+{
+    XMVECTOR u = p1 - p0;
+    XMVECTOR v = p2 - p0;
+    return XMVector3Normalize(
+            XMVector3Cross(u,v));
+}
+
 #define GAME_DIRECTX_MATH_H
 #endif

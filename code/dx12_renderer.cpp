@@ -180,7 +180,7 @@ struct mesh
     submesh Submeshes[MESH_MAX_SUBMESHES];
 };
 
-// The shapes in CubeMesh: each one's number is its place in Submeshes.
+// The shapes in ShapesMesh: each one's number is its place in Submeshes.
 enum shape_id
 {
     SHAPE_CUBE,
@@ -202,16 +202,16 @@ enum shape_id
 // pipeline is set once per layer instead of once per item.
 enum render_layer
 {
-    RENDER_LAYER_ANIMATED,     // CubePipeline: wobble and pulse
-    RENDER_LAYER_STILL,        // FloorPipeline: still and plain
+    RENDER_LAYER_ANIMATED,     // AnimatedPipeline: wobble and pulse
+    RENDER_LAYER_STILL,        // StillPipeline: still and plain
 
     RENDER_LAYER_COUNT
 };
 
 struct render_item
 {
-    mesh *Mesh;                // whose buffers: CubeMesh or WavesMesh (Luna's Geo)
-    u32 Submesh;               // which part of them - for CubeMesh, a shape_id
+    mesh *Mesh;                // whose buffers: ShapesMesh or WavesMesh (Luna's Geo)
+    u32 Submesh;               // which part of them - for ShapesMesh, a shape_id
     XMFLOAT4X4 World;          // where it is - XMFLOAT4X4 to store, XMMATRIX to calculate
     render_layer Layer;        // which pipeline draws it
 };
@@ -356,11 +356,11 @@ struct dx12_renderer
     IDxcUtils *DxcUtils;            // loads shader files
     IDxcCompiler3 *DxcCompiler;     // compiles them
 
-    // The cube: how its shaders take input, all its pipeline settings, and its geometry.
-    ID3D12RootSignature *CubeRootSignature;
-    ID3D12PipelineState *CubePipeline;
-    ID3D12PipelineState *FloorPipeline;     // same root signature, floor.hlsl: no wobble, no pulse
-    mesh CubeMesh;
+    // The scene: how its shaders take input, the two pipelines, and its geometry.
+    ID3D12RootSignature *RootSignature;
+    ID3D12PipelineState *AnimatedPipeline;
+    ID3D12PipelineState *StillPipeline;     // same root signature, floor.hlsl: no wobble, no pulse
+    mesh ShapesMesh;
     mesh WavesMesh;     // the water: static colours and indices, positions per frame resource
     u32 WavesVertexCount;
     // One set of per-frame things for each frame in flight, used in turn.
@@ -808,15 +808,17 @@ CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     return(Copied);
 }
 
-// Builds everything needed to draw the cube: root signature, shaders, pipeline
-// state, geometry in VRAM, and the constant buffer for its matrices.
+// Builds everything the scene needs, once at startup: the root signature,
+// the shaders and both pipelines (animated, still), every shape's geometry
+// in VRAM (ShapesMesh) plus the water's static parts (WavesMesh), and each
+// frame resource's constant buffer and water position buffer.
 internal b32
-CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory, memory_arena *Scratch)
+CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory, memory_arena *Scratch)
 {
     // ------------------------------------------------------------------
     // 1. Root signature: tells the pipeline the shaders take two constant
     //    buffers, b0 and b1, each passed as a plain GPU address (root CBV)
-    //    so no descriptor heap is needed.  The floor's pipeline uses this
+    //    so no descriptor heap is needed.  The still pipeline uses this
     //    same root signature: its shader reads the same b0 and b1.
     // ------------------------------------------------------------------
     D3D12_ROOT_PARAMETER Parameters[2] = {};
@@ -856,7 +858,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     b32 NoRootSignature =
         DX12_FAILED(Renderer->Device->CreateRootSignature(0, Serialized->GetBufferPointer(),
                                                           Serialized->GetBufferSize(),
-                                                          IID_PPV_ARGS(&Renderer->CubeRootSignature)));
+                                                          IID_PPV_ARGS(&Renderer->RootSignature)));
     ReleaseAndZero(Serialized);
     if(NoRootSignature)
     {
@@ -896,7 +898,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     //    the driver validates and compiles them once instead of per draw.
     // ------------------------------------------------------------------
     D3D12_GRAPHICS_PIPELINE_STATE_DESC PipelineDesc = {};
-    PipelineDesc.pRootSignature = Renderer->CubeRootSignature;
+    PipelineDesc.pRootSignature = Renderer->RootSignature;
     PipelineDesc.VS.pShaderBytecode = VertexShader->GetBufferPointer();
     PipelineDesc.VS.BytecodeLength = VertexShader->GetBufferSize();
     PipelineDesc.PS.pShaderBytecode = PixelShader->GetBufferPointer();
@@ -953,7 +955,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     // The PSO keeps its own copy of the shaders, so the blobs can be released.
     b32 NoPipeline =
         DX12_FAILED(Renderer->Device->CreateGraphicsPipelineState(&PipelineDesc,
-                                                                  IID_PPV_ARGS(&Renderer->CubePipeline)));
+                                                                  IID_PPV_ARGS(&Renderer->AnimatedPipeline)));
     ReleaseAndZero(VertexShader);
     ReleaseAndZero(PixelShader);
     if(NoPipeline)
@@ -961,30 +963,30 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
         return(false);
     }
 
-    // The floor's pipeline: the same description with floor.hlsl's shaders
+    // The still pipeline: the same description with floor.hlsl's shaders
     // swapped in.  Shaders are baked into a PSO, so a different shader means
-    // a different PSO - switched with SetPipelineState before the floor draw.
-    IDxcBlob *FloorVertexShader = CompileShader(Renderer, Thread, Memory,
+    // a different PSO - switched with SetPipelineState before the still layer.
+    IDxcBlob *StillVertexShader = CompileShader(Renderer, Thread, Memory,
                                                 L"data\\shaders\\floor.hlsl", L"VS", L"vs_6_6");
-    IDxcBlob *FloorPixelShader = CompileShader(Renderer, Thread, Memory,
+    IDxcBlob *StillPixelShader = CompileShader(Renderer, Thread, Memory,
                                                L"data\\shaders\\floor.hlsl", L"PS", L"ps_6_6");
-    if(!FloorVertexShader || !FloorPixelShader)
+    if(!StillVertexShader || !StillPixelShader)
     {
-        ReleaseAndZero(FloorVertexShader);
-        ReleaseAndZero(FloorPixelShader);
+        ReleaseAndZero(StillVertexShader);
+        ReleaseAndZero(StillPixelShader);
         return(false);
     }
-    PipelineDesc.VS.pShaderBytecode = FloorVertexShader->GetBufferPointer();
-    PipelineDesc.VS.BytecodeLength = FloorVertexShader->GetBufferSize();
-    PipelineDesc.PS.pShaderBytecode = FloorPixelShader->GetBufferPointer();
-    PipelineDesc.PS.BytecodeLength = FloorPixelShader->GetBufferSize();
+    PipelineDesc.VS.pShaderBytecode = StillVertexShader->GetBufferPointer();
+    PipelineDesc.VS.BytecodeLength = StillVertexShader->GetBufferSize();
+    PipelineDesc.PS.pShaderBytecode = StillPixelShader->GetBufferPointer();
+    PipelineDesc.PS.BytecodeLength = StillPixelShader->GetBufferSize();
 
-    b32 NoFloorPipeline =
+    b32 NoStillPipeline =
         DX12_FAILED(Renderer->Device->CreateGraphicsPipelineState(&PipelineDesc,
-                                                                  IID_PPV_ARGS(&Renderer->FloorPipeline)));
-    ReleaseAndZero(FloorVertexShader);
-    ReleaseAndZero(FloorPixelShader);
-    if(NoFloorPipeline)
+                                                                  IID_PPV_ARGS(&Renderer->StillPipeline)));
+    ReleaseAndZero(StillVertexShader);
+    ReleaseAndZero(StillPixelShader);
+    if(NoStillPipeline)
     {
         return(false);
     }
@@ -1063,7 +1065,7 @@ CreateCube(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
     //    one DrawShape line in RendererRender.
     // ------------------------------------------------------------------
     shape_builder Builder = BeginShapes(Scratch, SHAPE_MAX_VERTICES, SHAPE_MAX_INDICES);
-    mesh *Mesh = &Renderer->CubeMesh;
+    mesh *Mesh = &Renderer->ShapesMesh;
 
     // The hand-written ones: the cube is vertices 0-7 and indices 0-35 of
     // the arrays above, the pyramid the rest.
@@ -1249,11 +1251,11 @@ AddMeshRenderItem(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX Wo
     return(Result);
 }
 
-// The same, for one of CubeMesh's shapes - most of the scene.
+// The same, for one of ShapesMesh's shapes - most of the scene.
 internal u32
 AddRenderItem(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World, render_layer Layer)
 {
-    u32 Result = AddMeshRenderItem(Renderer, &Renderer->CubeMesh, Shape, World, Layer);
+    u32 Result = AddMeshRenderItem(Renderer, &Renderer->ShapesMesh, Shape, World, Layer);
     return(Result);
 }
 
@@ -1272,7 +1274,7 @@ BuildRenderItems(dx12_renderer *Renderer)
         AddRenderItem(Renderer, SHAPE_CUBE, XMMatrixIdentity(), RENDER_LAYER_ANIMATED);
     }
 
-    // The floor, 5 below the origin.
+    // The land, 5 below the origin.
     AddRenderItem(Renderer, SHAPE_LAND, XMMatrixTranslation(0.0f, -5.0f, 0.0f), RENDER_LAYER_STILL);
 
     // The water, at the same height as the land, so it fills the valleys.
@@ -1297,7 +1299,7 @@ BuildRenderItems(dx12_renderer *Renderer)
 }
 
 // Starts DirectX 12 on the given window: device, queue, swap chain, heaps,
-// depth buffer, then the cube.  False if DirectX 12 can't start.
+// depth buffer, then the scene.  False if DirectX 12 can't start.
 internal b32
 RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
                    HWND Window, i32 Width, i32 Height, memory_arena *Scratch)
@@ -1657,14 +1659,14 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     Renderer->ClearColor[2] = 0.0f;
     Renderer->ClearColor[3] = 1.0f;
 
-    // A missing compiler or cube isn't fatal: the game runs with just the clear colour.
+    // A missing compiler or scene isn't fatal: the game runs with just the clear colour.
     if(!LoadShaderCompiler(Renderer, Thread, Memory))
     {
         RendererLog(Thread, Memory, "ERROR: No shader compiler - nothing will be drawn.\n");
     }
-    else if(!CreateCube(Renderer, Thread, Memory, Scratch))
+    else if(!CreateScene(Renderer, Thread, Memory, Scratch))
     {
-        RendererLog(Thread, Memory, "ERROR: No cube - see the errors above.\n");
+        RendererLog(Thread, Memory, "ERROR: No scene - see the errors above.\n");
     }
     else
     {
@@ -1756,7 +1758,7 @@ DrawShape(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX World)
 
 // Draws every render item in Layer.  The layer's pipeline must already be
 // set.  Like Luna's DrawRenderItems, each item binds its own mesh's buffers -
-// but only when they differ from the last item's, since most share CubeMesh.
+// but only when they differ from the last item's, since most share ShapesMesh.
 internal void
 DrawRenderItems(dx12_renderer *Renderer, render_layer Layer)
 {
@@ -1777,8 +1779,8 @@ DrawRenderItems(dx12_renderer *Renderer, render_layer Layer)
     }
 }
 
-// Records and submits one frame: clear, draw the cube, draw ImGui, present.
-// CubeWorld and ViewProj are row-vector matrices from the game.
+// Records and submits one frame: clear, draw the render items, draw ImGui, present.
+// Worlds (the boxes) and ViewProj are row-vector matrices from the game.
 internal void
 RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
                game_input *Input, const XMFLOAT4X4 *Worlds, const XMFLOAT4X4 *ViewProj, r32 Time,
@@ -1847,8 +1849,8 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     Renderer->CommandList->RSSetScissorRects(1, &Scissor);
 
     //NOTE:(yigit): Drawing
-    // Only if the cube was created successfully.
-    if(Renderer->CubePipeline && Frame->ConstantBufferMapped)
+    // Only if the scene was created successfully.
+    if(Renderer->AnimatedPipeline && Frame->ConstantBufferMapped)
     {
         // The pass: camera and time, into slot 0 of this frame's constant
         // buffer, read by every draw through b1.
@@ -1861,7 +1863,7 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 
         // Set once for every shape: the root signature and b1 at the pass
         // slot.  (The buffers are set per mesh, in DrawRenderItems.)
-        Renderer->CommandList->SetGraphicsRootSignature(Renderer->CubeRootSignature);
+        Renderer->CommandList->SetGraphicsRootSignature(Renderer->RootSignature);
         Renderer->CommandList->SetGraphicsRootConstantBufferView(1,
                 Frame->ConstantBuffer->GetGPUVirtualAddress() + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE);
         // Every 3 indices form one triangle; positions from slot 0, colours from slot 1.
@@ -1890,10 +1892,10 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
 
         // Then the whole list, one layer at a time: its pipeline once, then
         // every item in it.
-        Renderer->CommandList->SetPipelineState(Renderer->CubePipeline);
+        Renderer->CommandList->SetPipelineState(Renderer->AnimatedPipeline);
         DrawRenderItems(Renderer, RENDER_LAYER_ANIMATED);
 
-        Renderer->CommandList->SetPipelineState(Renderer->FloorPipeline);
+        Renderer->CommandList->SetPipelineState(Renderer->StillPipeline);
         DrawRenderItems(Renderer, RENDER_LAYER_STILL);
     }
 
@@ -2008,14 +2010,14 @@ RendererShutdown(dx12_renderer *Renderer)
         }
         ReleaseAndZero(Frame->WavesPositionBuffer);
     }
-    ReleaseAndZero(Renderer->CubeMesh.IndexBuffer);
-    ReleaseAndZero(Renderer->CubeMesh.VertexBuffers[0]);
-    ReleaseAndZero(Renderer->CubeMesh.VertexBuffers[1]);
+    ReleaseAndZero(Renderer->ShapesMesh.IndexBuffer);
+    ReleaseAndZero(Renderer->ShapesMesh.VertexBuffers[0]);
+    ReleaseAndZero(Renderer->ShapesMesh.VertexBuffers[1]);
     ReleaseAndZero(Renderer->WavesMesh.IndexBuffer);
     ReleaseAndZero(Renderer->WavesMesh.VertexBuffers[1]);
-    ReleaseAndZero(Renderer->FloorPipeline);
-    ReleaseAndZero(Renderer->CubePipeline);
-    ReleaseAndZero(Renderer->CubeRootSignature);
+    ReleaseAndZero(Renderer->StillPipeline);
+    ReleaseAndZero(Renderer->AnimatedPipeline);
+    ReleaseAndZero(Renderer->RootSignature);
     ReleaseAndZero(Renderer->DxcCompiler);
     ReleaseAndZero(Renderer->DxcUtils);
     if(Renderer->DxcModule)
