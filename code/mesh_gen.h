@@ -391,6 +391,18 @@ HillsHeight(r32 X, r32 Z)
     return(0.3f*( Z*sinf(0.1f*X) + X*cosf(0.1f*Z)));
 }
 
+internal XMFLOAT3
+HillsNormal(r32 X, r32 Z)
+{
+    XMFLOAT3 N(
+       -0.03f*Z*cosf(0.1f*X) - 0.3f*cosf(0.1f*Z),
+        1.0f, 
+        -0.3f*sinf(0.1f*X) + 0.03f*X*sinf(0.1f*Z));
+        
+    XMStoreFloat3(&N, XMVector3Normalize(XMLoadFloat3(&N)));   // load, normalize, store
+    return(N);
+}
+
 internal void
 MeshGenComputeNormals(XMFLOAT3 *Positions, u32 VertexCount, u16 *Indices, u32 IndexCount,
                       XMFLOAT3 *Normals)

@@ -1127,9 +1127,7 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
     {
         LandVertices[Index] = ModelVertexFromMeshGen(&Land.Vertices[Index]);
         LandVertices[Index].Pos.y = HillsHeight(LandVertices[Index].Pos.x, LandVertices[Index].Pos.z);
-
-        // TODO(yigit): A4 - HillsNormal(x, z).  Straight up until then.
-        LandVertices[Index].Normal = XMFLOAT3(0.0f, 1.0f, 0.0f);
+        LandVertices[Index].Normal = HillsNormal(LandVertices[Index].Pos.x, LandVertices[Index].Pos.z);
     }
     Mesh->Submeshes[SHAPE_LAND] = AddShape(&Builder, LandVertices, Land.VertexCount,
                                            Land.Indices, Land.IndexCount);
@@ -1138,7 +1136,8 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
     // Upload the vertices and indices to VRAM.
     u32 VertexCount = Builder.VertexCount;
     u32 IndexCount = Builder.IndexCount;
-    if(!CreateStaticBuffer(Renderer, Thread, Memory, Builder.Vertices, VertexCount*sizeof(model_vertex), &Mesh->VertexBuffer) ||
+    if(!CreateStaticBuffer(Renderer, Thread, Memory, Builder.Vertices, 
+                VertexCount*sizeof(model_vertex), &Mesh->VertexBuffer) ||
        !CreateStaticBuffer(Renderer, Thread, Memory, Builder.Indices, IndexCount*sizeof(u16), &Mesh->IndexBuffer))
     {
         return(false);
