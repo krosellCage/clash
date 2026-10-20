@@ -391,6 +391,36 @@ HillsHeight(r32 X, r32 Z)
     return(0.3f*( Z*sinf(0.1f*X) + X*cosf(0.1f*Z)));
 }
 
+internal void
+MeshGenComputeNormals(XMFLOAT3 *Positions, u32 VertexCount, u16 *Indices, u32 IndexCount,
+                      XMFLOAT3 *Normals)
+{
+    for(u32 Vertex = 0; Vertex < VertexCount; ++Vertex)
+    {
+        Normals[Vertex] = XMFLOAT3(0.0f, 0.0f, 0.0f);
+    }
+
+    u32 TriangleCount = IndexCount / 3;
+
+    for(u32 Triangle = 0; Triangle < TriangleCount; ++Triangle)
+    {
+        u16 I0 = Indices[Triangle*3 + 0];
+        u16 I1 = Indices[Triangle*3 + 1];
+        u16 I2 = Indices[Triangle*3 + 2];
+        XMVECTOR P0 = XMLoadFloat3(&Positions[I0]);
+        XMVECTOR P1 = XMLoadFloat3(&Positions[I1]);
+        XMVECTOR P2 = XMLoadFloat3(&Positions[I2]);
+        XMVECTOR FaceNormal = ComputeNormal(P0, P1, P2);
+        XMStoreFloat3(&Normals[I0], XMLoadFloat3(&Normals[I0]) + FaceNormal);
+        XMStoreFloat3(&Normals[I1], XMLoadFloat3(&Normals[I1]) + FaceNormal);
+        XMStoreFloat3(&Normals[I2], XMLoadFloat3(&Normals[I2]) + FaceNormal);
+    }
+    for(u32 Vertex = 0; Vertex < VertexCount; ++Vertex)
+    {
+        XMStoreFloat3(&Normals[Vertex], XMVector3Normalize(XMLoadFloat3(&Normals[Vertex])));
+    }
+}
+
 // Room for several shapes, filled by MeshGenAppend.
 internal mesh_gen_data
 MeshGenAllocate(memory_arena *Arena, u32 MaxVertices, u32 MaxIndices)

@@ -106,13 +106,13 @@ struct frame_resource
     ID3D12Resource *ConstantBuffer;
     u8 *ConstantBufferMapped;
 
-    // The water's positions (vertex slot 0) - a dynamic vertex buffer (Luna
-    // 7.7.4).  Rewritten by the CPU every frame, so it lives where the
-    // constant buffer does and for the same reasons: an UPLOAD heap, mapped
-    // for good, and one per frame resource so the CPU never writes the
-    // positions an earlier frame's draw is still reading.
-    ID3D12Resource *WavesPositionBuffer;
-    XMFLOAT3 *WavesPositionsMapped;     // the same 12 bytes per vertex as VPosData
+    // The water's vertices - a dynamic vertex buffer (Luna 7.7.4).
+    // Rewritten by the CPU every frame, so it lives where the constant
+    // buffer does and for the same reasons: an UPLOAD heap, mapped for
+    // good, and one per frame resource so the CPU never writes the vertices
+    // an earlier frame's draw is still reading.
+    ID3D12Resource *WavesVertexBuffer;
+    struct model_vertex *WavesVerticesMapped;
 
     // The fence value signalled after this frame's commands: once the GPU's
     // fence has reached it, this frame resource is free to reuse.  0 = never
@@ -120,16 +120,23 @@ struct frame_resource
     u64 FenceValue;
 };
 
-// Positions only: vertex buffer slot 0.
-struct VPosData
+// Luna's vertex (8.14.1): everything about one vertex together, in one
+// vertex buffer - "interleaved".  44 bytes; the offsets in ModelVertexDesc
+// are where each field starts.
+struct model_vertex
 {
-    XMFLOAT3 Pos;
+    XMFLOAT3 Pos;        // 12 bytes, at byte 0
+    XMFLOAT3 Normal;     // 12 bytes, at byte 12
+    XMFLOAT2 TexC;       //  8 bytes, at byte 24 - chapter 9 (textures)
+    XMFLOAT3 TangentU;   // 12 bytes, at byte 32 - chapter 19 (normal maps)
 };
-// Colours only: vertex buffer slot 1.
-struct VColorData
-{
-    XMCOLOR Color;
-};
+
+// Fail the build if the compiler ever puts a field somewhere else than the
+// input layout says.
+static_assert(offsetof(model_vertex, Normal) == 12, "model_vertex: Normal moved");
+static_assert(offsetof(model_vertex, TexC) == 24, "model_vertex: TexC moved");
+static_assert(offsetof(model_vertex, TangentU) == 32, "model_vertex: TangentU moved");
+static_assert(sizeof(model_vertex) == 44, "model_vertex: size changed");
 
 // Byte-for-byte copies of cube.hlsl's cbuffers b0 and b1, filled with transposed
 // matrices because HLSL reads them column by column.
@@ -171,9 +178,13 @@ struct descriptor_heap
 // Fixed-size array so a mesh needs no allocation.
 struct mesh
 {
-    ID3D12Resource *VertexBuffers[2];       // DEFAULT heap (VRAM): fastest for the GPU to read
+    // One vertex buffer of model_vertexes (slot 0), and the index buffer.
+    // DEFAULT heap (VRAM): fastest for the GPU to read.  (The water's vertex
+    // buffer is the exception: 0 here, its view re-pointed every frame at
+    // the frame resource's own.)
+    ID3D12Resource *VertexBuffer;
     ID3D12Resource *IndexBuffer;
-    D3D12_VERTEX_BUFFER_VIEW VertexViews[2];    // built once, since the buffers never move
+    D3D12_VERTEX_BUFFER_VIEW VertexView;    // built once, since the buffers never move
     D3D12_INDEX_BUFFER_VIEW IndexView;
 
     u32 SubmeshCount;
@@ -219,14 +230,13 @@ struct render_item
 #define MAX_RENDER_ITEMS 256
 
 // Collects shapes into one set of arrays, so they all go to the GPU as one
-// pair of vertex buffers and one index buffer.  Each Add copies a shape onto
-// the end and returns its submesh - where it landed.
+// vertex buffer and one index buffer.  Each Add copies a shape onto the end
+// and returns its submesh - where it landed.
 #define SHAPE_MAX_VERTICES 65536
 #define SHAPE_MAX_INDICES (3*65536)
 struct shape_builder
 {
-    VPosData *Positions;
-    VColorData *Colors;
+    model_vertex *Vertices;
     u16 *Indices;
     u32 VertexCount;
     u32 IndexCount;
@@ -238,18 +248,17 @@ internal shape_builder
 BeginShapes(memory_arena *Arena, u32 MaxVertices, u32 MaxIndices)
 {
     shape_builder Result = {};
-    Result.Positions = PushArray(Arena, MaxVertices, VPosData);
-    Result.Colors = PushArray(Arena, MaxVertices, VColorData);
+    Result.Vertices = PushArray(Arena, MaxVertices, model_vertex);
     Result.Indices = PushArray(Arena, MaxIndices, u16);
     Result.MaxVertices = MaxVertices;
     Result.MaxIndices = MaxIndices;
     return(Result);
 }
 
-// A shape typed by hand: its positions, its colours (one per vertex), and
-// indices counting from its own vertex 0 - the submesh's BaseVertex moves them.
+// A shape made in clash's own vertex format, and indices counting from its
+// own vertex 0 - the submesh's BaseVertex moves them.
 internal submesh
-AddShape(shape_builder *Builder, VPosData *Positions, VColorData *Colors, u32 VertexCount,
+AddShape(shape_builder *Builder, model_vertex *Vertices, u32 VertexCount,
          u16 *Indices, u32 IndexCount)
 {
     Assert((Builder->VertexCount + VertexCount) <= Builder->MaxVertices);
@@ -260,8 +269,7 @@ AddShape(shape_builder *Builder, VPosData *Positions, VColorData *Colors, u32 Ve
     Result.StartIndex = Builder->IndexCount;
     Result.BaseVertex = (i32)Builder->VertexCount;
 
-    memcpy(Builder->Positions + Builder->VertexCount, Positions, VertexCount*sizeof(VPosData));
-    memcpy(Builder->Colors + Builder->VertexCount, Colors, VertexCount*sizeof(VColorData));
+    memcpy(Builder->Vertices + Builder->VertexCount, Vertices, VertexCount*sizeof(model_vertex));
     memcpy(Builder->Indices + Builder->IndexCount, Indices, IndexCount*sizeof(u16));
     Builder->VertexCount += VertexCount;
     Builder->IndexCount += IndexCount;
@@ -269,10 +277,22 @@ AddShape(shape_builder *Builder, VPosData *Positions, VColorData *Colors, u32 Ve
     return(Result);
 }
 
-// A shape from MeshGen: its positions, all in one colour (mesh_gen_vertex has
-// none of its own).
+// One MeshGen vertex in clash's vertex format: the same four things,
+// mesh_gen_vertex just keeps them in a different order.
+internal model_vertex
+ModelVertexFromMeshGen(mesh_gen_vertex *Source)
+{
+    model_vertex Result;
+    Result.Pos = Source->Position;
+    Result.Normal = Source->Normal;
+    Result.TexC = Source->TexC;
+    Result.TangentU = Source->TangentU;
+    return(Result);
+}
+
+// A shape from MeshGen: its vertices converted, its indices copied.
 internal submesh
-AddGeneratedShape(shape_builder *Builder, mesh_gen_data *Shape, XMCOLOR Color)
+AddGeneratedShape(shape_builder *Builder, mesh_gen_data *Shape)
 {
     Assert((Builder->VertexCount + Shape->VertexCount) <= Builder->MaxVertices);
     Assert((Builder->IndexCount + Shape->IndexCount) <= Builder->MaxIndices);
@@ -284,8 +304,7 @@ AddGeneratedShape(shape_builder *Builder, mesh_gen_data *Shape, XMCOLOR Color)
 
     for(u32 VertexIndex = 0; VertexIndex < Shape->VertexCount; ++VertexIndex)
     {
-        Builder->Positions[Builder->VertexCount + VertexIndex].Pos = Shape->Vertices[VertexIndex].Position;
-        Builder->Colors[Builder->VertexCount + VertexIndex].Color = Color;
+        Builder->Vertices[Builder->VertexCount + VertexIndex] = ModelVertexFromMeshGen(&Shape->Vertices[VertexIndex]);
     }
     memcpy(Builder->Indices + Builder->IndexCount, Shape->Indices, Shape->IndexCount*sizeof(u16));
     Builder->VertexCount += Shape->VertexCount;
@@ -881,15 +900,19 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
 
     // ------------------------------------------------------------------
     // 3. Input layout: tells the GPU how to turn buffer bytes into the vertex
-    //    shader's inputs - POSITION from slot 0, COLOR from slot 1, each at
-    //    offset 0 because each buffer holds only one attribute.
+    //    shader's inputs.  Luna's, for model_vertex (8.14.1): all four from
+    //    one buffer (slot 0), each at its byte offset in the vertex.  A
+    //    shader may read only some of them - ours read POSITION and NORMAL.
     // ------------------------------------------------------------------
-
-    D3D12_INPUT_ELEMENT_DESC vertexDesc[] =
+    D3D12_INPUT_ELEMENT_DESC ModelVertexDesc[] =
     {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
             D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 1, 0,
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12,
+            D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24,
+            D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32,
             D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
@@ -943,8 +966,8 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
 
     // Triangles drawn into one back buffer plus the depth buffer, no MSAA;
     // formats must match the real targets.
-    PipelineDesc.InputLayout.pInputElementDescs = vertexDesc;
-    PipelineDesc.InputLayout.NumElements = (UINT)ArrayCount(vertexDesc);
+    PipelineDesc.InputLayout.pInputElementDescs = ModelVertexDesc;
+    PipelineDesc.InputLayout.NumElements = (UINT)ArrayCount(ModelVertexDesc);
     PipelineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     PipelineDesc.NumRenderTargets = 1;
     PipelineDesc.RTVFormats[0] = SWAP_CHAIN_FORMAT;
@@ -992,49 +1015,28 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
     }
 
     // ------------------------------------------------------------------
-    // 5. Two shapes packed into one pair of vertex buffers: the cube's 8
-    //    corners, then the pyramid's 5, each in its own local space (the
-    //    World matrix moves them).  Same order in both arrays: vertex i is
-    //    Positions[i] with Colors[i].
+    // 5. Two shapes typed by hand: the cube's 8 corners, then the
+    //    pyramid's 5, each in its own local space (the World matrix moves
+    //    them).  Positions only - their normals are worked out below.
     // ------------------------------------------------------------------
-    VPosData Positions[] =
+    XMFLOAT3 Positions[] =
     {
         // Cube: vertices 0-7.
-        {{-1.0f, -1.0f, -1.0f}},    // 0
-        {{-1.0f, +1.0f, -1.0f}},    // 1
-        {{+1.0f, +1.0f, -1.0f}},    // 2
-        {{+1.0f, -1.0f, -1.0f}},    // 3
-        {{-1.0f, -1.0f, +1.0f}},    // 4
-        {{-1.0f, +1.0f, +1.0f}},    // 5
-        {{+1.0f, +1.0f, +1.0f}},    // 6
-        {{+1.0f, -1.0f, +1.0f}},    // 7
+        XMFLOAT3(-1.0f, -1.0f, -1.0f),    // 0
+        XMFLOAT3(-1.0f, +1.0f, -1.0f),    // 1
+        XMFLOAT3(+1.0f, +1.0f, -1.0f),    // 2
+        XMFLOAT3(+1.0f, -1.0f, -1.0f),    // 3
+        XMFLOAT3(-1.0f, -1.0f, +1.0f),    // 4
+        XMFLOAT3(-1.0f, +1.0f, +1.0f),    // 5
+        XMFLOAT3(+1.0f, +1.0f, +1.0f),    // 6
+        XMFLOAT3(+1.0f, -1.0f, +1.0f),    // 7
 
         // Pyramid: vertices 8-12, numbered 0-4 in its own indices.
-        {{-1.0f, -1.0f, -1.0f}},    // 0: base
-        {{+1.0f, -1.0f, -1.0f}},    // 1: base
-        {{-1.0f, -1.0f, +1.0f}},    // 2: base
-        {{+1.0f, -1.0f, +1.0f}},    // 3: base
-        {{+0.0f, +1.0f, +0.0f}},    // 4: tip
-    };
-
-    VColorData Colors[] =
-    {
-        // Cube.
-        {{1.0f, 1.0f, 1.0f, 1.0f}},     // 0: white
-        {{0.0f, 0.0f, 0.0f, 1.0f}},     // 1: black
-        {{1.0f, 0.0f, 0.0f, 1.0f}},     // 2: red
-        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 3: green
-        {{0.0f, 0.0f, 1.0f, 1.0f}},     // 4: blue
-        {{1.0f, 1.0f, 0.0f, 1.0f}},     // 5: yellow
-        {{0.0f, 1.0f, 1.0f, 1.0f}},     // 6: cyan
-        {{1.0f, 0.0f, 1.0f, 1.0f}},     // 7: magenta
-
-        // Pyramid.
-        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 0: green
-        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 1: green
-        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 2: green
-        {{0.0f, 1.0f, 0.0f, 1.0f}},     // 3: green
-        {{1.0f, 0.0f, 0.0f, 1.0f}},     // 4: red
+        XMFLOAT3(-1.0f, -1.0f, -1.0f),    // 0: base
+        XMFLOAT3(+1.0f, -1.0f, -1.0f),    // 1: base
+        XMFLOAT3(-1.0f, -1.0f, +1.0f),    // 2: base
+        XMFLOAT3(+1.0f, -1.0f, +1.0f),    // 3: base
+        XMFLOAT3(+0.0f, +1.0f, +0.0f),    // 4: tip
     };
 
     // ------------------------------------------------------------------
@@ -1061,127 +1063,116 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
 
     // ------------------------------------------------------------------
     // 7. Every shape into one builder (scratch memory), each one's submesh
-    //    kept under its shape_id.  Adding a shape is one Add line here and
-    //    one DrawShape line in RendererRender.
+    //    kept under its shape_id.
     // ------------------------------------------------------------------
     shape_builder Builder = BeginShapes(Scratch, SHAPE_MAX_VERTICES, SHAPE_MAX_INDICES);
     mesh *Mesh = &Renderer->ShapesMesh;
 
-    // The hand-written ones: the cube is vertices 0-7 and indices 0-35 of
-    // the arrays above, the pyramid the rest.
-    Mesh->Submeshes[SHAPE_CUBE] = AddShape(&Builder, Positions, Colors, 8, Indices, 36);
-    Mesh->Submeshes[SHAPE_PYRAMID] = AddShape(&Builder, Positions + 8, Colors + 8, 5, Indices + 36, 18);
+    // The hand-written ones have no normals of their own: each vertex gets
+    // the average of its triangles' face normals (8.2.1).  The cube is
+    // vertices 0-7 and indices 0-35 of the arrays above, the pyramid the
+    // rest.
+    //
+    // NOTE(yigit): The cube's 8 corners are each shared by 3 faces, so
+    // each gets a diagonal normal and the lit cube looks rounded.  Luna's
+    // box keeps sharp edges with its own 4 vertices per face (24 in all).
+    XMFLOAT3 CubeNormals[8];
+    XMFLOAT3 PyramidNormals[5];
+    MeshGenComputeNormals(Positions, 8, Indices, 36, CubeNormals);
+    MeshGenComputeNormals(Positions + 8, 5, Indices + 36, 18, PyramidNormals);
 
+    // Into clash's vertex format: position and normal, the rest 0 until
+    // chapters 9 and 19 need them.
+    model_vertex CubeVertices[8] = {};
+    for(u32 Index = 0; Index < 8; ++Index)
+    {
+        CubeVertices[Index].Pos = Positions[Index];
+        CubeVertices[Index].Normal = CubeNormals[Index];
+    }
+    model_vertex PyramidVertices[5] = {};
+    for(u32 Index = 0; Index < 5; ++Index)
+    {
+        PyramidVertices[Index].Pos = Positions[8 + Index];
+        PyramidVertices[Index].Normal = PyramidNormals[Index];
+    }
+    Mesh->Submeshes[SHAPE_CUBE] = AddShape(&Builder, CubeVertices, 8, Indices, 36);
+    Mesh->Submeshes[SHAPE_PYRAMID] = AddShape(&Builder, PyramidVertices, 5, Indices + 36, 18);
+
+    // The MeshGen shapes come with normals (and texture coordinates and
+    // tangents) already.
     // The floor: 120 x 120 units, 21 x 21 vertices = 20 x 20 cells.
     mesh_gen_data Grid = MeshGenGrid(Scratch, 120.0f, 120.0f, 21, 21);
-    Mesh->Submeshes[SHAPE_FLOOR] = AddGeneratedShape(&Builder, &Grid, XMCOLOR(0.3f, 0.3f, 0.3f, 1.0f));
+    Mesh->Submeshes[SHAPE_FLOOR] = AddGeneratedShape(&Builder, &Grid);
 
     // A cylinder: radius 1 at the bottom, 0.5 at the top, 3 tall, 20 slices
     // around, 4 stacks up.
     mesh_gen_data Cylinder = MeshGenCylinder(Scratch, 1.0f, 0.5f, 3.0f, 20, 4);
-    Mesh->Submeshes[SHAPE_CYLINDER] = AddGeneratedShape(&Builder, &Cylinder, XMCOLOR(1.0f, 0.5f, 0.0f, 1.0f));
+    Mesh->Submeshes[SHAPE_CYLINDER] = AddGeneratedShape(&Builder, &Cylinder);
 
-    //cone
-
+    // A cone: a cylinder whose top radius is 0.
     mesh_gen_data Cone = MeshGenCylinder(Scratch, 1.0f, 0.0f, 3.0f, 20, 4);
-    Mesh->Submeshes[SHAPE_CONE] = AddGeneratedShape(&Builder, &Cone, XMCOLOR(1.0f, 0.0f, 0.0f, 1.0f));
-    Mesh->SubmeshCount = SHAPE_COUNT;
+    Mesh->Submeshes[SHAPE_CONE] = AddGeneratedShape(&Builder, &Cone);
 
     mesh_gen_data Geosphere = MeshGenGeosphere(Scratch, 1.0f, 3);
-    Mesh->Submeshes[SHAPE_GEOSPHERE] = AddGeneratedShape(&Builder, &Geosphere, XMCOLOR(0.0f, 0.6f, 1.0f, 1.0f));
+    Mesh->Submeshes[SHAPE_GEOSPHERE] = AddGeneratedShape(&Builder, &Geosphere);
 
+    // The land (Luna 7.7.3): a grid lifted by HillsHeight.  Lifting it
+    // tilts every surface, so the grid's straight-up normals are wrong -
+    // the right ones come from the hills' slopes, HillsNormal (8.14.2).
+    // (Its colour-by-height is gone: in Luna's LitWaves the land's colour
+    // comes from its material.)
     mesh_gen_data Land = MeshGenGrid(Scratch, 160.0f, 160.0f, 50, 50);
-
-    VPosData *LandPositions = PushArray(Scratch, Land.VertexCount, VPosData);
-    VColorData *LandColors = PushArray(Scratch, Land.VertexCount, VColorData);
-
+    model_vertex *LandVertices = PushArray(Scratch, Land.VertexCount, model_vertex);
     for(u32 Index = 0; Index < Land.VertexCount; ++Index)
     {
-        LandPositions[Index].Pos = Land.Vertices[Index].Position;
-        LandPositions[Index].Pos.y = HillsHeight(LandPositions[Index].Pos.x, LandPositions[Index].Pos.z);
+        LandVertices[Index] = ModelVertexFromMeshGen(&Land.Vertices[Index]);
+        LandVertices[Index].Pos.y = HillsHeight(LandVertices[Index].Pos.x, LandVertices[Index].Pos.z);
 
-        r32 Y = LandPositions[Index].Pos.y;
-        if(Y < -10.0f)
-        {
-            LandColors[Index].Color = XMCOLOR(1.0f, 0.96f, 0.62f, 1.0f);     // sandy beach
-        }
-        else if(Y < 5.0f)
-        {
-            LandColors[Index].Color = XMCOLOR(0.48f, 0.77f, 0.46f, 1.0f); // light green
-        }
-        else if(Y < 12.0f)
-        {
-            LandColors[Index].Color = XMCOLOR(0.1f, 0.48f, 0.19f, 1.0f); //dark green
-        }
-        else if(Y < 20.0f)
-        {
-            LandColors[Index].Color = XMCOLOR(0.45f, 0.39f, 0.34f, 1.0f); //brown
-        }
-        else
-        {
-            LandColors[Index].Color = XMCOLOR(1.0f, 1.0f, 1.0f, 1.0f);
-        }
+        // TODO(yigit): A4 - HillsNormal(x, z).  Straight up until then.
+        LandVertices[Index].Normal = XMFLOAT3(0.0f, 1.0f, 0.0f);
     }
+    Mesh->Submeshes[SHAPE_LAND] = AddShape(&Builder, LandVertices, Land.VertexCount,
+                                           Land.Indices, Land.IndexCount);
+    Mesh->SubmeshCount = SHAPE_COUNT;
 
-    Mesh->Submeshes[SHAPE_LAND] = AddShape(&Builder, LandPositions, LandColors, Land.VertexCount,
-                                       Land.Indices, Land.IndexCount);
-
-    mesh_gen_data Water = MeshGenGrid(Scratch, 127.0f, 127.0f, 128, 128);
-    VColorData *WaterColors = PushArray(Scratch, Water.VertexCount, VColorData);
-
-    for(u32 Index = 0; Index < Water.VertexCount; ++Index)
-    {
-        WaterColors[Index].Color = XMCOLOR(0.0f, 0.3f, 0.8f, 1.0f);
-    }
-    // Upload positions, colours and indices to VRAM.
+    // Upload the vertices and indices to VRAM.
     u32 VertexCount = Builder.VertexCount;
     u32 IndexCount = Builder.IndexCount;
-    if(!CreateStaticBuffer(Renderer, Thread, Memory, Builder.Positions, VertexCount*sizeof(VPosData), &Mesh->VertexBuffers[0]) ||
-       !CreateStaticBuffer(Renderer, Thread, Memory, Builder.Colors, VertexCount*sizeof(VColorData), &Mesh->VertexBuffers[1]) ||
+    if(!CreateStaticBuffer(Renderer, Thread, Memory, Builder.Vertices, VertexCount*sizeof(model_vertex), &Mesh->VertexBuffer) ||
        !CreateStaticBuffer(Renderer, Thread, Memory, Builder.Indices, IndexCount*sizeof(u16), &Mesh->IndexBuffer))
     {
         return(false);
     }
 
-    // Vertex views: address, total size, and stride (bytes per vertex) of each buffer.
-    // The sizes are the builder's totals - every shape's vertices.
-    // Slot 0: positions, 12 bytes each.
-    Mesh->VertexViews[0].BufferLocation = Mesh->VertexBuffers[0]->GetGPUVirtualAddress();
-    Mesh->VertexViews[0].SizeInBytes = VertexCount*(UINT)sizeof(VPosData);
-    Mesh->VertexViews[0].StrideInBytes = (UINT)sizeof(VPosData);
-
-    // Slot 1: colours, 4 bytes each.
-    Mesh->VertexViews[1].BufferLocation = Mesh->VertexBuffers[1]->GetGPUVirtualAddress();
-    Mesh->VertexViews[1].SizeInBytes = VertexCount*(UINT)sizeof(VColorData);
-    Mesh->VertexViews[1].StrideInBytes = (UINT)sizeof(VColorData);
+    // Vertex view: address, total size (every shape's vertices), and
+    // stride - 44 bytes from one vertex to the next.
+    Mesh->VertexView.BufferLocation = Mesh->VertexBuffer->GetGPUVirtualAddress();
+    Mesh->VertexView.SizeInBytes = VertexCount*(UINT)sizeof(model_vertex);
+    Mesh->VertexView.StrideInBytes = (UINT)sizeof(model_vertex);
 
     // Index view: address, size, and 16-bit format to match the u16 array.
     Mesh->IndexView.BufferLocation = Mesh->IndexBuffer->GetGPUVirtualAddress();
     Mesh->IndexView.SizeInBytes = IndexCount*(UINT)sizeof(u16);
     Mesh->IndexView.Format = DXGI_FORMAT_R16_UINT;
 
-    // The water's static parts: its colours (slot 1) and its indices, both
-    // fixed.  Its positions (slot 0) change every frame - they live in the
-    // frame resources instead.
+    // The water's static part: its indices.  A grid laid out like the waves
+    // (128 x 128 points, 1 apart), used only for those.  Its vertices change
+    // every frame, so they live in the frame resources instead, and its
+    // vertex view is pointed at this frame's every frame.
+    mesh_gen_data Water = MeshGenGrid(Scratch, 127.0f, 127.0f, 128, 128);
     mesh *WavesMesh = &Renderer->WavesMesh;
-    if(!CreateStaticBuffer(Renderer, Thread, Memory, WaterColors, Water.VertexCount*sizeof(VColorData), &WavesMesh->VertexBuffers[1]) ||
-       !CreateStaticBuffer(Renderer, Thread, Memory, Water.Indices, Water.IndexCount*sizeof(u16), &WavesMesh->IndexBuffer))
+    if(!CreateStaticBuffer(Renderer, Thread, Memory, Water.Indices, Water.IndexCount*sizeof(u16), &WavesMesh->IndexBuffer))
     {
         return(false);
     }
 
-    // Slot 1: colours, 4 bytes each.
-    WavesMesh->VertexViews[1].BufferLocation = WavesMesh->VertexBuffers[1]->GetGPUVirtualAddress();
-    WavesMesh->VertexViews[1].SizeInBytes = Water.VertexCount*(UINT)sizeof(VColorData);
-    WavesMesh->VertexViews[1].StrideInBytes = (UINT)sizeof(VColorData);
-
-    // Indices: 16-bit, like the cube's.
+    // Indices: 16-bit, like the shapes'.
     WavesMesh->IndexView.BufferLocation = WavesMesh->IndexBuffer->GetGPUVirtualAddress();
     WavesMesh->IndexView.SizeInBytes = Water.IndexCount*(UINT)sizeof(u16);
     WavesMesh->IndexView.Format = DXGI_FORMAT_R16_UINT;
 
-    // Kept for the per-frame position buffers, made below with the
-    // constant buffers.
+    // Kept for the per-frame vertex buffers, made below with the constant
+    // buffers.
     Renderer->WavesVertexCount = Water.VertexCount;
 
     // One part: the whole grid.
@@ -1218,13 +1209,13 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
             return(false);
         }
 
-        // The water's positions: made and mapped the same way, sized for
+        // The water's vertices: made and mapped the same way, sized for
         // every water vertex.
-        D3D12_RESOURCE_DESC WavesDesc = DescribeBuffer(Renderer->WavesVertexCount*sizeof(XMFLOAT3));
+        D3D12_RESOURCE_DESC WavesDesc = DescribeBuffer(Renderer->WavesVertexCount*sizeof(model_vertex));
         if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &WavesDesc,
                                                                  D3D12_RESOURCE_STATE_GENERIC_READ, 0,
-                                                                 IID_PPV_ARGS(&Frame->WavesPositionBuffer))) ||
-           DX12_FAILED(Frame->WavesPositionBuffer->Map(0, &NoRead, (void **)&Frame->WavesPositionsMapped)))
+                                                                 IID_PPV_ARGS(&Frame->WavesVertexBuffer))) ||
+           DX12_FAILED(Frame->WavesVertexBuffer->Map(0, &NoRead, (void **)&Frame->WavesVerticesMapped)))
         {
             return(false);
         }
@@ -1770,7 +1761,7 @@ DrawRenderItems(dx12_renderer *Renderer, render_layer Layer)
         {
             if(Item->Mesh != BoundMesh)
             {
-                Renderer->CommandList->IASetVertexBuffers(0, 2, Item->Mesh->VertexViews);
+                Renderer->CommandList->IASetVertexBuffers(0, 1, &Item->Mesh->VertexView);
                 Renderer->CommandList->IASetIndexBuffer(&Item->Mesh->IndexView);
                 BoundMesh = Item->Mesh;
             }
@@ -1866,19 +1857,31 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         Renderer->CommandList->SetGraphicsRootSignature(Renderer->RootSignature);
         Renderer->CommandList->SetGraphicsRootConstantBufferView(1,
                 Frame->ConstantBuffer->GetGPUVirtualAddress() + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE);
-        // Every 3 indices form one triangle; positions from slot 0, colours from slot 1.
+        // Every 3 indices form one triangle.
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        // The water (Luna's UpdateWaves): copy this frame's wave positions
-        // into this frame resource's position buffer, then point the water's
-        // slot 0 at that buffer - a different one each frame, in turn.
+        // The water (Luna's UpdateWaves): this frame's wave positions into
+        // this frame resource's vertex buffer, then the water's vertex view
+        // pointed at that buffer - a different one each frame, in turn.
+        //
+        // NOTE(yigit): Every field written, every frame: this is an upload
+        // heap, written straight into GPU-visible memory - nothing in it
+        // can be left over from "last time" and trusted.
         Assert(Waves->VertexCount == Renderer->WavesVertexCount);
-        memcpy(Frame->WavesPositionsMapped, Waves->Current, Waves->VertexCount*sizeof(XMFLOAT3));
+        for(u32 Index = 0; Index < Waves->VertexCount; ++Index)
+        {
+            model_vertex *Vertex = &Frame->WavesVerticesMapped[Index];
+            Vertex->Pos = Waves->Current[Index];
+            // TODO(yigit): A5 - the waves' own normals.  Straight up until then.
+            Vertex->Normal = XMFLOAT3(0.0f, 1.0f, 0.0f);
+            Vertex->TexC = XMFLOAT2(0.0f, 0.0f);
+            Vertex->TangentU = XMFLOAT3(1.0f, 0.0f, 0.0f);
+        }
 
-        D3D12_VERTEX_BUFFER_VIEW *WavesPositions = &Renderer->WavesMesh.VertexViews[0];
-        WavesPositions->BufferLocation = Frame->WavesPositionBuffer->GetGPUVirtualAddress();
-        WavesPositions->SizeInBytes = Renderer->WavesVertexCount*(UINT)sizeof(XMFLOAT3);
-        WavesPositions->StrideInBytes = (UINT)sizeof(XMFLOAT3);
+        D3D12_VERTEX_BUFFER_VIEW *WavesView = &Renderer->WavesMesh.VertexView;
+        WavesView->BufferLocation = Frame->WavesVertexBuffer->GetGPUVirtualAddress();
+        WavesView->SizeInBytes = Renderer->WavesVertexCount*(UINT)sizeof(model_vertex);
+        WavesView->StrideInBytes = (UINT)sizeof(model_vertex);
 
         // A new frame: every object slot is free again.
         Renderer->ObjectSlotsUsed = 0;
@@ -2003,18 +2006,16 @@ RendererShutdown(dx12_renderer *Renderer)
             Frame->ConstantBufferMapped = 0;
         }
         ReleaseAndZero(Frame->ConstantBuffer);
-        if(Frame->WavesPositionBuffer && Frame->WavesPositionsMapped)
+        if(Frame->WavesVertexBuffer && Frame->WavesVerticesMapped)
         {
-            Frame->WavesPositionBuffer->Unmap(0, 0);
-            Frame->WavesPositionsMapped = 0;
+            Frame->WavesVertexBuffer->Unmap(0, 0);
+            Frame->WavesVerticesMapped = 0;
         }
-        ReleaseAndZero(Frame->WavesPositionBuffer);
+        ReleaseAndZero(Frame->WavesVertexBuffer);
     }
     ReleaseAndZero(Renderer->ShapesMesh.IndexBuffer);
-    ReleaseAndZero(Renderer->ShapesMesh.VertexBuffers[0]);
-    ReleaseAndZero(Renderer->ShapesMesh.VertexBuffers[1]);
+    ReleaseAndZero(Renderer->ShapesMesh.VertexBuffer);
     ReleaseAndZero(Renderer->WavesMesh.IndexBuffer);
-    ReleaseAndZero(Renderer->WavesMesh.VertexBuffers[1]);
     ReleaseAndZero(Renderer->StillPipeline);
     ReleaseAndZero(Renderer->AnimatedPipeline);
     ReleaseAndZero(Renderer->RootSignature);

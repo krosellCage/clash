@@ -148,7 +148,8 @@ XMStoreMat4(FXMMATRIX M)
     return(Result);
 }
 
-XMVECTOR ComputeNormal(FXMVECTOR p0,
+internal XMVECTOR
+ComputeNormal(FXMVECTOR p0,
         FXMVECTOR p1,
         FXMVECTOR p2)
 {
@@ -156,6 +157,15 @@ XMVECTOR ComputeNormal(FXMVECTOR p0,
     XMVECTOR v = p2 - p0;
     return XMVector3Normalize(
             XMVector3Cross(u,v));
+}
+
+internal XMMATRIX
+InverseTranspose(CXMMATRIX M)
+{
+    XMMATRIX A = M;
+    A.r[3] = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+    XMVECTOR Det = XMMatrixDeterminant(A);
+    return(XMMatrixTranspose(XMMatrixInverse(&Det, A)));
 }
 
 #define GAME_DIRECTX_MATH_H
