@@ -25,6 +25,8 @@ struct waves
     r32 K2;
     r32 K3;
 
+    r32 Spacing;
+
     r32 TimeStep;           // seconds between simulation steps
     r32 TimeSinceStep;      // added up from each frame's time until it reaches TimeStep
 
@@ -32,6 +34,9 @@ struct waves
     // over the oldest ones, then swaps the two pointers.
     XMFLOAT3 *Previous;
     XMFLOAT3 *Current;
+
+    XMFLOAT3 *Normals;
+    XMFLOAT3 *TangentX;
 };
 
 // A flat RowCount x ColumnCount grid, Spacing apart, laid out like
@@ -46,6 +51,7 @@ WavesInitialize(waves *Waves, memory_arena *Arena, u32 RowCount, u32 ColumnCount
     Waves->VertexCount = RowCount*ColumnCount;
     Waves->TimeStep = TimeStep;
     Waves->TimeSinceStep = 0.0f;
+    Waves->Spacing = Spacing;
 
     r32 D = Damping*TimeStep + 2.0f;
     r32 E = (Speed*Speed)*(TimeStep*TimeStep) / (Spacing*Spacing);
@@ -55,6 +61,8 @@ WavesInitialize(waves *Waves, memory_arena *Arena, u32 RowCount, u32 ColumnCount
 
     Waves->Previous = PushArray(Arena, Waves->VertexCount, XMFLOAT3);
     Waves->Current = PushArray(Arena, Waves->VertexCount, XMFLOAT3);
+    Waves->Normals = PushArray(Arena, Waves->VertexCount, XMFLOAT3);
+    Waves->TangentX = PushArray(Arena, Waves->VertexCount, XMFLOAT3);
 
     r32 HalfWidth = 0.5f*(r32)(ColumnCount - 1)*Spacing;
     r32 HalfDepth = 0.5f*(r32)(RowCount - 1)*Spacing;
@@ -66,6 +74,8 @@ WavesInitialize(waves *Waves, memory_arena *Arena, u32 RowCount, u32 ColumnCount
             r32 X = -HalfWidth + (r32)Column*Spacing;
             Waves->Previous[Row*ColumnCount + Column] = XMFLOAT3(X, 0.0f, Z);
             Waves->Current[Row*ColumnCount + Column] = XMFLOAT3(X, 0.0f, Z);
+            Waves->Normals[Row*ColumnCount + Column] = XMFLOAT3(0.0f, 1.0f, 0.0f);    // flat water faces up
+            Waves->TangentX[Row*ColumnCount + Column] = XMFLOAT3(1.0f, 0.0f, 0.0f);   // along +x
         }
     }
 }
@@ -103,6 +113,27 @@ WavesUpdate(waves *Waves, r32 DeltaTime)
         XMFLOAT3 *Swap = Waves->Previous;
         Waves->Previous = Waves->Current;
         Waves->Current = Swap;
+
+        for(u32 Row = 1; Row < Waves->RowCount - 1; ++Row)
+        {
+            for(u32 Column = 1; Column < Waves->ColumnCount - 1; ++Column)
+            {
+                u32 Here = Row*RowLength + Column;
+                r32 L = Waves->Current[Here - 1].y;              // left
+                r32 R = Waves->Current[Here + 1].y;              // right
+                r32 T = Waves->Current[Here - RowLength].y;      // above: row - 1, the +z side
+                r32 B = Waves->Current[Here + RowLength].y;      // below: row + 1, the -z side
+
+                // Leaning away from uphill: -(slope in x), up, -(slope in z),
+                // all times 2*Spacing so nothing needs dividing.
+                XMVECTOR Normal = XMVectorSet(L - R, 2.0f*Waves->Spacing, B - T, 0.0f);
+                XMStoreFloat3(&Waves->Normals[Here], XMVector3Normalize(Normal));
+
+                // Along the surface in +x: 2*Spacing across, rising by R - L.
+                XMVECTOR Tangent = XMVectorSet(2.0f*Waves->Spacing, R - L, 0.0f, 0.0f);
+                XMStoreFloat3(&Waves->TangentX[Here], XMVector3Normalize(Tangent));
+            }
+        }
 
         Waves->TimeSinceStep = 0.0f;
     }

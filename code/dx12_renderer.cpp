@@ -1871,10 +1871,9 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         {
             model_vertex *Vertex = &Frame->WavesVerticesMapped[Index];
             Vertex->Pos = Waves->Current[Index];
-            // TODO(yigit): A5 - the waves' own normals.  Straight up until then.
-            Vertex->Normal = XMFLOAT3(0.0f, 1.0f, 0.0f);
+            Vertex->Normal = Waves->Normals[Index];
             Vertex->TexC = XMFLOAT2(0.0f, 0.0f);
-            Vertex->TangentU = XMFLOAT3(1.0f, 0.0f, 0.0f);
+            Vertex->TangentU = Waves->TangentX[Index];
         }
 
         D3D12_VERTEX_BUFFER_VIEW *WavesView = &Renderer->WavesMesh.VertexView;
