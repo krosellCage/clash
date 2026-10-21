@@ -138,19 +138,9 @@ static_assert(offsetof(model_vertex, TexC) == 24, "model_vertex: TexC moved");
 static_assert(offsetof(model_vertex, TangentU) == 32, "model_vertex: TangentU moved");
 static_assert(sizeof(model_vertex) == 44, "model_vertex: size changed");
 
-// Byte-for-byte copies of cube.hlsl's cbuffers b0 and b1, filled with transposed
-// matrices because HLSL reads them column by column.
-struct object_constants
-{
-    XMFLOAT4X4 World;
-};
-
-struct pass_constants
-{
-    XMFLOAT4X4 ViewProj;
-    XMFLOAT4 PulseColor;
-    r32 gTime;
-};
+// object_constants (b0) and pass_constants (b1): written once, for this file
+// and the shaders both (Luna's SharedTypes.h, 8.9.1).
+#include "../data/shaders/shared_types.h"
 
 // Fail the build if a constants struct no longer fits its 256-byte slot.
 static_assert(sizeof(object_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "object_constants outgrew its slot");
