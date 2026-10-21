@@ -52,6 +52,15 @@
 DEFINE_CBUFFER(object_constants, b0)
 {
     float4x4 World;
+    uint MaterialIndex;     // which entry of the material buffer it's drawn with (8.9.2)
+
+    // World fills 4 rows of 16 bytes exactly; MaterialIndex starts a fifth
+    // and uses 4 of its bytes.  The padding fills that row (Luna's
+    // PerObjectCB_pad0..2), so C and HLSL are plainly the same size and a
+    // field added later starts a clean row.
+    uint ObjectPad0;
+    uint ObjectPad1;
+    uint ObjectPad2;
 };
 
 // b1: the whole frame's - written once per frame into slot 0.
@@ -61,6 +70,24 @@ DEFINE_CBUFFER(pass_constants, b1)
     float4 PulseColor;
     float gTime;
 };
+
+// One material, as the shaders see it (Luna's MaterialData, 8.9.2) - one
+// entry in the material buffer.  A plain struct, not a cbuffer: it's an
+// element of a StructuredBuffer, which the shader indexes.
+struct material_data
+{
+    float4 DiffuseAlbedo;           // the fraction of red, green, blue it reflects (8.5)
+    float3 FresnelR0;               // how much it reflects head-on (8.7.1)
+    float Roughness;                // 0 smooth .. 1 rough (8.7.2)
+    float DisplacementScale;
+    uint DiffuseMapIndex;
+    uint NormalMapIndex;
+    uint GlossHeightAoMapIndex;
+    float4x4 MatTransform;
+    float TransparencyWeight;
+    float IndexOfRefraction;
+};
+
 
 // NOTE(yigit): The C side takes its type names back.  clash is one unity
 // build - Dear ImGui and SimpleMath are compiled after this file - and a

@@ -114,6 +114,12 @@ struct frame_resource
     ID3D12Resource *WavesVertexBuffer;
     struct model_vertex *WavesVerticesMapped;
 
+    // Every material's material_data (8.9.2) - the shader indexes it by
+    // MaterialIndex.  Mapped for good like the rest; UpdateMaterialBuffer
+    // copies a changed material into each frame resource's in turn.
+    ID3D12Resource *MaterialBuffer;
+    struct material_data *MaterialBufferMapped;
+
     // The fence value signalled after this frame's commands: once the GPU's
     // fence has reached it, this frame resource is free to reuse.  0 = never
     // used yet, so nothing to wait for.
@@ -145,7 +151,7 @@ static_assert(sizeof(model_vertex) == 44, "model_vertex: size changed");
 // Fail the build if a constants struct no longer fits its 256-byte slot.
 static_assert(sizeof(object_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "object_constants outgrew its slot");
 static_assert(sizeof(pass_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "pass_constants outgrew its slot");
-
+static_assert(sizeof(material_data) == 120, "material_data: size changed");
 // A descriptor heap plus what's needed to address slot i (Start + i * DescriptorSize).
 // The size varies by GPU and type, so it's queried once and stored.
 struct descriptor_heap
@@ -209,12 +215,54 @@ enum render_layer
     RENDER_LAYER_COUNT
 };
 
+// The materials (Luna's BuildMaterials): each one's number is its place in
+// Materials, and in the material buffer.
+enum material_id
+{
+    MATERIAL_FOREST_GREEN,
+    MATERIAL_STEEL_BLUE,
+    MATERIAL_LIGHT_GRAY,
+    MATERIAL_SKULL,
+    MATERIAL_LAKE_BLUE,
+
+    MATERIAL_COUNT
+};
+
+// One material, as the C side keeps it (Luna's Material, 8.9.2): what the
+// shader sees of it (material_data, copied into the material buffer) plus
+// the bookkeeping only the CPU needs.  Many render items can share one.
+struct material
+{
+    u32 MatIndex;               // its place in the material buffer - what the shader indexes with
+
+    // How many frame resources still hold an old copy of it.  Each frame
+    // resource has its own material buffer; after a change this starts at
+    // FRAME_RESOURCE_COUNT and goes down by one per frame, as each one's
+    // copy is updated, until all are current (0).
+    u32 NumFramesDirty;
+
+    XMFLOAT4 DiffuseAlbedo;     // the fraction of red, green, blue it reflects (8.5)
+    XMFLOAT3 FresnelR0;         // how much it reflects head-on (8.7.1)
+    r32 Roughness;              // 0 smooth .. 1 rough (8.7.2)
+    r32 DisplacementScale;      // displacement mapping - a later chapter
+    XMFLOAT4X4 MatTransform;    // moves its texture coordinates - chapter 9
+
+    // Which textures it uses - chapter 9 on.  Signed: -1 is "none".
+    i32 AlbedoBindlessIndex;
+    i32 NormalBindlessIndex;
+    i32 GlossHeightAoBindlessIndex;
+
+    r32 TransparencyWeight;     // the ray-tracing chapters
+    r32 IndexOfRefraction;      // the ray-tracing chapters
+};
+
 struct render_item
 {
     mesh *Mesh;                // whose buffers: ShapesMesh or WavesMesh (Luna's Geo)
     u32 Submesh;               // which part of them - for ShapesMesh, a shape_id
     XMFLOAT4X4 World;          // where it is - XMFLOAT4X4 to store, XMMATRIX to calculate
     render_layer Layer;        // which pipeline draws it
+    material_id Material;      // which material it's drawn with (Luna's Mat)
 };
 
 #define MAX_RENDER_ITEMS 256
@@ -382,6 +430,10 @@ struct dx12_renderer
     // The scene: everything to draw, filled once by BuildRenderItems.  The
     // boxes are BOX_COUNT items from FirstBoxItem on - their World comes
     // from the game, every frame.
+    // Every material, filled once by BuildMaterials; render items say which
+    // one they use.
+    material Materials[MATERIAL_COUNT];
+
     render_item RenderItems[MAX_RENDER_ITEMS];
     u32 RenderItemCount;
     u32 FirstBoxItem;
@@ -835,20 +887,33 @@ internal b32
 CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory, memory_arena *Scratch)
 {
     // ------------------------------------------------------------------
-    // 1. Root signature: tells the pipeline the shaders take two constant
-    //    buffers, b0 and b1, each passed as a plain GPU address (root CBV)
-    //    so no descriptor heap is needed.  The still pipeline uses this
-    //    same root signature: its shader reads the same b0 and b1.
+    // 1. Root signature: tells the pipeline what the shaders take - two
+    //    constant buffers, b0 and b1, and the material buffer, t0.  Each is
+    //    passed as a plain GPU address (a root descriptor), so no
+    //    descriptor heap is needed.  Both pipelines use this same root
+    //    signature: their shaders read the same registers.
     // ------------------------------------------------------------------
-    D3D12_ROOT_PARAMETER Parameters[2] = {};
+    D3D12_ROOT_PARAMETER Parameters[3] = {};
     Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    Parameters[0].Descriptor.ShaderRegister = 0;        // b0: ObjectConstants
+    Parameters[0].Descriptor.ShaderRegister = 0;        // b0: object_constants
     Parameters[0].Descriptor.RegisterSpace = 0;
-    Parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    // ALL, not just the vertex shader: the pixel shader reads b0's
+    // MaterialIndex to find its material.
+    Parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    Parameters[1].Descriptor.ShaderRegister = 1;        // b1: PassConstants
+    Parameters[1].Descriptor.ShaderRegister = 1;        // b1: pass_constants
     Parameters[1].Descriptor.RegisterSpace = 0;
     Parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // t0: the material buffer, a StructuredBuffer<material_data> (8.9.2) -
+    // a root SRV: a buffer the shader reads as an array.  Registers come in
+    // kinds that count separately (b constant buffers, t things read, u
+    // things written, s samplers), so this is t0 beside b0 and b1.  ALL:
+    // the pixel shader reads the materials.
+    Parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    Parameters[2].Descriptor.ShaderRegister = 0;        // t0: gMaterialData
+    Parameters[2].Descriptor.RegisterSpace = 0;
+    Parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     // ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT: we feed vertices through an input layout.
     D3D12_ROOT_SIGNATURE_DESC RootDesc = {};
@@ -1218,16 +1283,70 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
         {
             return(false);
         }
+
+        // The materials: one material_data per material, made and mapped
+        // the same way - filled by UpdateMaterialBuffer.
+        D3D12_RESOURCE_DESC MaterialsDesc = DescribeBuffer(MATERIAL_COUNT*sizeof(material_data));
+        if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &MaterialsDesc,
+                                                                 D3D12_RESOURCE_STATE_GENERIC_READ, 0,
+                                                                 IID_PPV_ARGS(&Frame->MaterialBuffer))) ||
+           DX12_FAILED(Frame->MaterialBuffer->Map(0, &NoRead, (void **)&Frame->MaterialBufferMapped)))
+        {
+            return(false);
+        }
     }
 
     return(true);
 }
 
+// Fills one material (Luna's AddMaterial): the three values lighting uses
+// now, Luna's defaults for the rest, and dirty in every frame resource so
+// each one's material buffer gets a copy.
+internal void
+AddMaterial(dx12_renderer *Renderer, material_id Id, XMFLOAT4 DiffuseAlbedo,
+            XMFLOAT3 FresnelR0, r32 Roughness)
+{
+    material *Material = &Renderer->Materials[Id];
+    Material->MatIndex = Id;                                // its place in the buffer is its id
+    Material->NumFramesDirty = FRAME_RESOURCE_COUNT;
+    Material->DiffuseAlbedo = DiffuseAlbedo;
+    Material->FresnelR0 = FresnelR0;
+    Material->Roughness = Roughness;
+
+    Material->DisplacementScale = 1.0f;
+    XMStoreFloat4x4(&Material->MatTransform, XMMatrixIdentity());   // texture coordinates unmoved
+    Material->AlbedoBindlessIndex = -1;                     // no textures yet
+    Material->NormalBindlessIndex = -1;
+    Material->GlossHeightAoBindlessIndex = -1;
+    Material->TransparencyWeight = 0.0f;
+    Material->IndexOfRefraction = 0.0f;
+}
+
+// The materials (Luna's BuildMaterials, 8.9.2).  FresnelR0 from Luna's
+// table (8.7.1): water 0.02, plastic 0.05.  Runs once, at startup.
+internal void
+BuildMaterials(dx12_renderer *Renderer)
+{
+    // Colors::ForestGreen, SteelBlue and LightGray are (34, 139, 34),
+    // (70, 130, 180) and (211, 211, 211) out of 255.
+    AddMaterial(Renderer, MATERIAL_FOREST_GREEN, XMFLOAT4(0.133f, 0.545f, 0.133f, 1.0f),
+                XMFLOAT3(0.02f, 0.02f, 0.02f), 0.1f);
+    AddMaterial(Renderer, MATERIAL_STEEL_BLUE, XMFLOAT4(0.275f, 0.510f, 0.706f, 1.0f),
+                XMFLOAT3(0.05f, 0.05f, 0.05f), 0.3f);
+    AddMaterial(Renderer, MATERIAL_LIGHT_GRAY, XMFLOAT4(0.827f, 0.827f, 0.827f, 1.0f),
+                XMFLOAT3(0.02f, 0.02f, 0.02f), 0.2f);
+    AddMaterial(Renderer, MATERIAL_SKULL, XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f),
+                XMFLOAT3(0.05f, 0.05f, 0.05f), 0.3f);
+    AddMaterial(Renderer, MATERIAL_LAKE_BLUE, XMFLOAT4(0.2f, 0.2f, 0.8f, 1.0f),
+                XMFLOAT3(0.05f, 0.05f, 0.05f), 0.3f);
+}
+
 // Adds one object to the scene: whose buffers, which part of them, where,
-// and in which layer.  Returns its place in the list, for items that are
-// moved later.
+// in which layer, and in which material.  Returns its place in the list,
+// for items that are moved later.
 internal u32
-AddMeshRenderItem(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX World, render_layer Layer)
+AddMeshRenderItem(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX World,
+                  render_layer Layer, material_id Material)
 {
     Assert(Renderer->RenderItemCount < MAX_RENDER_ITEMS);
     u32 Result = Renderer->RenderItemCount++;
@@ -1237,15 +1356,17 @@ AddMeshRenderItem(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX Wo
     Item->Submesh = Submesh;
     XMStoreFloat4x4(&Item->World, World);
     Item->Layer = Layer;
+    Item->Material = Material;
 
     return(Result);
 }
 
 // The same, for one of ShapesMesh's shapes - most of the scene.
 internal u32
-AddRenderItem(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World, render_layer Layer)
+AddRenderItem(dx12_renderer *Renderer, shape_id Shape, FXMMATRIX World, render_layer Layer,
+              material_id Material)
 {
-    u32 Result = AddMeshRenderItem(Renderer, &Renderer->ShapesMesh, Shape, World, Layer);
+    u32 Result = AddMeshRenderItem(Renderer, &Renderer->ShapesMesh, Shape, World, Layer, Material);
     return(Result);
 }
 
@@ -1261,16 +1382,19 @@ BuildRenderItems(dx12_renderer *Renderer)
     Renderer->FirstBoxItem = Renderer->RenderItemCount;
     for(u32 BoxIndex = 0; BoxIndex < BOX_COUNT; ++BoxIndex)
     {
-        AddRenderItem(Renderer, SHAPE_CUBE, XMMatrixIdentity(), RENDER_LAYER_ANIMATED);
+        AddRenderItem(Renderer, SHAPE_CUBE, XMMatrixIdentity(), RENDER_LAYER_ANIMATED,
+                      MATERIAL_STEEL_BLUE);
     }
 
-    // The land, 5 below the origin.
-    AddRenderItem(Renderer, SHAPE_LAND, XMMatrixTranslation(0.0f, -5.0f, 0.0f), RENDER_LAYER_STILL);
+    // The land, 5 below the origin - forest green, as in Luna's LitWaves.
+    AddRenderItem(Renderer, SHAPE_LAND, XMMatrixTranslation(0.0f, -5.0f, 0.0f), RENDER_LAYER_STILL,
+                  MATERIAL_FOREST_GREEN);
 
-    // The water, at the same height as the land, so it fills the valleys.
-    // Its own mesh - WavesMesh, part 0 - since its positions change.
+    // The water, at the same height as the land, so it fills the valleys -
+    // lake blue, as in LitWaves.  Its own mesh - WavesMesh, part 0 - since
+    // its positions change.
     AddMeshRenderItem(Renderer, &Renderer->WavesMesh, 0, XMMatrixTranslation(0.0f, -5.0f, 0.0f),
-                      RENDER_LAYER_STILL);
+                      RENDER_LAYER_STILL, MATERIAL_LAKE_BLUE);
 
     // A row of 5 cylinders behind the boxes, standing on the floor (3 tall
     // and centred, so their middle is 1.5 above -5).
@@ -1278,14 +1402,17 @@ BuildRenderItems(dx12_renderer *Renderer)
     {
         AddRenderItem(Renderer, SHAPE_CYLINDER,
                       XMMatrixTranslation((r32)CylinderIndex*3.0f - 6.0f, -3.5f, 9.0f),
-                      RENDER_LAYER_STILL);
+                      RENDER_LAYER_STILL, MATERIAL_LIGHT_GRAY);
     }
 
     // In front of the boxes: the pyramid and the cone on the floor, the
     // geosphere above the cone.
-    AddRenderItem(Renderer, SHAPE_PYRAMID, XMMatrixTranslation(0.0f, -4.0f, -10.0f), RENDER_LAYER_STILL);
-    AddRenderItem(Renderer, SHAPE_CONE, XMMatrixTranslation(0.0f, -3.5f, -5.0f), RENDER_LAYER_STILL);
-    AddRenderItem(Renderer, SHAPE_GEOSPHERE, XMMatrixTranslation(0.0f, 3.5f, -5.0f), RENDER_LAYER_STILL);
+    AddRenderItem(Renderer, SHAPE_PYRAMID, XMMatrixTranslation(0.0f, -4.0f, -10.0f), RENDER_LAYER_STILL,
+                  MATERIAL_STEEL_BLUE);
+    AddRenderItem(Renderer, SHAPE_CONE, XMMatrixTranslation(0.0f, -3.5f, -5.0f), RENDER_LAYER_STILL,
+                  MATERIAL_LIGHT_GRAY);
+    AddRenderItem(Renderer, SHAPE_GEOSPHERE, XMMatrixTranslation(0.0f, 3.5f, -5.0f), RENDER_LAYER_STILL,
+                  MATERIAL_SKULL);
 }
 
 // Starts DirectX 12 on the given window: device, queue, swap chain, heaps,
@@ -1660,6 +1787,7 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     }
     else
     {
+        BuildMaterials(Renderer);
         BuildRenderItems(Renderer);
     }
 
@@ -1725,19 +1853,20 @@ WaitForFence(dx12_renderer *Renderer, u64 Value)
     }
 }
 
-// Draws part Submesh of Mesh at World: writes World to the next free object
-// slot of this frame's constant buffer, points b0 at that slot, and draws
-// that part of the buffers.  The pipeline, b1 and Mesh's buffers must
-// already be set.
+// Draws part Submesh of Mesh at World in Material: writes World and the
+// material's index to the next free object slot of this frame's constant
+// buffer, points b0 at that slot, and draws that part of the buffers.  The
+// pipeline, b1, t0 and Mesh's buffers must already be set.
 internal void
-DrawShape(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX World)
+DrawShape(dx12_renderer *Renderer, mesh *Mesh, u32 Submesh, FXMMATRIX World, material_id Material)
 {
     Assert(Renderer->ObjectSlotsUsed < OBJECT_SLOT_COUNT);
     u32 Slot = FIRST_OBJECT_SLOT + Renderer->ObjectSlotsUsed++;
     frame_resource *Frame = &Renderer->Frames[Renderer->FrameIndex];
 
-    object_constants Object;
+    object_constants Object = {};       // the padding too, so no leftover bytes reach the GPU
     XMStoreFloat4x4(&Object.World, XMMatrixTranspose(World));
+    Object.MaterialIndex = Renderer->Materials[Material].MatIndex;   // Luna: ri->Mat->MatIndex
     memcpy(Frame->ConstantBufferMapped + Slot * CONSTANT_BUFFER_SLOT_SIZE,
            &Object, sizeof(Object));
     Renderer->CommandList->SetGraphicsRootConstantBufferView(0,
@@ -1764,7 +1893,42 @@ DrawRenderItems(dx12_renderer *Renderer, render_layer Layer)
                 Renderer->CommandList->IASetIndexBuffer(&Item->Mesh->IndexView);
                 BoundMesh = Item->Mesh;
             }
-            DrawShape(Renderer, Item->Mesh, Item->Submesh, XMLoadFloat4x4(&Item->World));
+            DrawShape(Renderer, Item->Mesh, Item->Submesh, XMLoadFloat4x4(&Item->World), Item->Material);
+        }
+    }
+}
+
+// Copies every material that changed into this frame resource's material
+// buffer (Luna's UpdateMaterialBuffer, 8.9.2).  A changed material is
+// copied FRAME_RESOURCE_COUNT times - once into each frame resource's
+// buffer as it comes round - then left alone until it changes again.
+internal void
+UpdateMaterialBuffer(dx12_renderer *Renderer, frame_resource *Frame)
+{
+    for(u32 MaterialIndex = 0; MaterialIndex < MATERIAL_COUNT; ++MaterialIndex)
+    {
+        material *Material = &Renderer->Materials[MaterialIndex];
+        if(Material->NumFramesDirty > 0)
+        {
+            material_data Data = {};
+            Data.DiffuseAlbedo = Material->DiffuseAlbedo;
+            Data.FresnelR0 = Material->FresnelR0;
+            Data.Roughness = Material->Roughness;
+            Data.DisplacementScale = Material->DisplacementScale;
+            Data.TransparencyWeight = Material->TransparencyWeight;
+            Data.IndexOfRefraction = Material->IndexOfRefraction;
+
+            // Transposed, like World: HLSL reads matrices column by column.
+            XMStoreFloat4x4(&Data.MatTransform, XMMatrixTranspose(XMLoadFloat4x4(&Material->MatTransform)));
+
+            // The C side's -1 ("no texture") becomes 0xFFFFFFFF as a u32 -
+            // how "none" looks to the shader.
+            Data.DiffuseMapIndex = (u32)Material->AlbedoBindlessIndex;
+            Data.NormalMapIndex = (u32)Material->NormalBindlessIndex;
+            Data.GlossHeightAoMapIndex = (u32)Material->GlossHeightAoBindlessIndex;
+
+            Frame->MaterialBufferMapped[Material->MatIndex] = Data;
+            --Material->NumFramesDirty;
         }
     }
 }
@@ -1788,6 +1952,13 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     Renderer->FrameIndex = (Renderer->FrameIndex + 1) % FRAME_RESOURCE_COUNT;
     frame_resource *Frame = &Renderer->Frames[Renderer->FrameIndex];
     WaitForFence(Renderer, Frame->FenceValue);
+
+    // Its material buffer is free now too: bring it up to date.  (Only if
+    // the scene was made - without it there is no buffer.)
+    if(Frame->MaterialBufferMapped)
+    {
+        UpdateMaterialBuffer(Renderer, Frame);
+    }
 
     // Now its allocator's memory and its constant buffer are free: reuse the
     // memory and start recording.
@@ -1856,6 +2027,7 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
         Renderer->CommandList->SetGraphicsRootSignature(Renderer->RootSignature);
         Renderer->CommandList->SetGraphicsRootConstantBufferView(1,
                 Frame->ConstantBuffer->GetGPUVirtualAddress() + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE);
+        Renderer->CommandList->SetGraphicsRootShaderResourceView(2, Frame->MaterialBuffer->GetGPUVirtualAddress());
         // Every 3 indices form one triangle.
         Renderer->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -2010,6 +2182,12 @@ RendererShutdown(dx12_renderer *Renderer)
             Frame->WavesVerticesMapped = 0;
         }
         ReleaseAndZero(Frame->WavesVertexBuffer);
+        if(Frame->MaterialBuffer && Frame->MaterialBufferMapped)
+        {
+            Frame->MaterialBuffer->Unmap(0, 0);
+            Frame->MaterialBufferMapped = 0;
+        }
+        ReleaseAndZero(Frame->MaterialBuffer);
     }
     ReleaseAndZero(Renderer->ShapesMesh.IndexBuffer);
     ReleaseAndZero(Renderer->ShapesMesh.VertexBuffer);

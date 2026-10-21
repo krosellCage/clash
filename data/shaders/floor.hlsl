@@ -33,10 +33,10 @@ vertex_out VS(vertex_in In)
 
 float4 PS(vertex_out In) : SV_TARGET
 {
-    // Back to length 1 after blending across the triangle.
-    float3 Normal = normalize(In.NormalW);
+    // This object's material: its entry in the material buffer.
+    material_data Material = gMaterialData[MaterialIndex];
 
-    // Checking the normals before there is light: each axis from -1..1 to a
-    // colour 0..1.  Facing +x is red, +y green, +z blue.
-    return float4(0.5f*Normal + 0.5f, 1.0f);
+    // Checking the materials reach the shader, before there is light to
+    // use them: each object flat in its material's colour.
+    return Material.DiffuseAlbedo;
 }

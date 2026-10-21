@@ -11,4 +11,9 @@
 #define HLSL_CODE 1
 #include "shared_types.h"
 
+// t0: every material (8.9.2) - an array in GPU memory, one material_data
+// per material, bound once per frame as root parameter 2.  A shader picks
+// its object's entry with b0's MaterialIndex.
+StructuredBuffer<material_data> gMaterialData : register(t0);
+
 #endif
