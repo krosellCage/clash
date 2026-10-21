@@ -374,6 +374,7 @@ struct dx12_renderer
     HMODULE DxcModule;
     IDxcUtils *DxcUtils;            // loads shader files
     IDxcCompiler3 *DxcCompiler;     // compiles them
+    IDxcIncludeHandler *DxcIncludeHandler;  // loads their #include files
 
     // The scene: how its shaders take input, the two pipelines, and its geometry.
     ID3D12RootSignature *RootSignature;
@@ -668,6 +669,14 @@ LoadShaderCompiler(dx12_renderer *Renderer, thread_context *Thread, game_memory 
         return(false);
     }
 
+    // DXC is a library, so it reads no files itself: on an #include it asks
+    // an include handler to load the file.  The default one loads it from
+    // disk - looking where the -I switches in CompileShader say.
+    if(DX12_FAILED(Renderer->DxcUtils->CreateDefaultIncludeHandler(&Renderer->DxcIncludeHandler)))
+    {
+        return(false);
+    }
+
     return(true);
 }
 
@@ -697,6 +706,7 @@ CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memo
         FileName,
         L"-E", EntryPoint,
         L"-T", Target,
+        L"-I", L"data\\shaders",        // where #include "common.hlsl" and friends are found
 #if CLASH_DEBUG
         DXC_ARG_DEBUG,                  // -Zi: debug info, for PIX
         DXC_ARG_SKIP_OPTIMIZATIONS,     // -Od: so PIX can step line by line
@@ -706,7 +716,7 @@ CompileShader(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memo
 
     IDxcResult *Compiled = 0;
     if(!DX12_FAILED(Renderer->DxcCompiler->Compile(&SourceBuffer, Arguments, (UINT32)ArrayCount(Arguments),
-                                                   0, IID_PPV_ARGS(&Compiled))))
+                                                   Renderer->DxcIncludeHandler, IID_PPV_ARGS(&Compiled))))
     {
         // Log errors and warnings as dxc.exe would print them.
         IDxcBlobUtf8 *Errors = 0;
@@ -2017,6 +2027,7 @@ RendererShutdown(dx12_renderer *Renderer)
     ReleaseAndZero(Renderer->StillPipeline);
     ReleaseAndZero(Renderer->AnimatedPipeline);
     ReleaseAndZero(Renderer->RootSignature);
+    ReleaseAndZero(Renderer->DxcIncludeHandler);
     ReleaseAndZero(Renderer->DxcCompiler);
     ReleaseAndZero(Renderer->DxcUtils);
     if(Renderer->DxcModule)

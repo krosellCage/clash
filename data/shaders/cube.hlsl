@@ -1,14 +1,5 @@
-cbuffer ObjectConstants : register(b0)
-{
-    float4x4 World;
-};
-
-cbuffer PassConstants : register(b1)
-{
-    float4x4 ViewProj;
-    float4   PulseColor;
-    float gTime;
-};
+// The constant buffers: World (b0), and ViewProj, PulseColor, gTime (b1).
+#include "common.hlsl"
 
 // The parts of model_vertex this shader reads.  The input layout has four;
 // a shader may take only some of them, found by their names.

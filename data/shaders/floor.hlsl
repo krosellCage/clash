@@ -2,17 +2,8 @@
 // cube.hlsl, without the wobble and the pulse - every vertex goes where
 // World puts it.
 
-cbuffer ObjectConstants : register(b0)
-{
-    float4x4 World;
-};
-
-cbuffer PassConstants : register(b1)
-{
-    float4x4 ViewProj;
-    float4   PulseColor;
-    float gTime;
-};
+// The constant buffers: World (b0), and ViewProj, PulseColor, gTime (b1).
+#include "common.hlsl"
 
 // The parts of model_vertex this shader reads.
 struct vertex_in
