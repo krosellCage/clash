@@ -219,7 +219,9 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     XMMATRIX View = XMMatrixLookAtLH(XMLoadVec3(Camera->Position, 1.0f),
                                      XMLoadVec3(Camera->Position + Camera->Front, 1.0f),
                                      XMLoadVec3(Camera->Up, 0.0f));
-    XMMATRIX Projection = XMMatrixPerspectiveFovLH(Camera->Zoom, Aspect, 0.1f, 500.0f);
+    r32 NearZ = 0.1f;
+    r32 FarZ = 500.0f;
+    XMMATRIX Projection = XMMatrixPerspectiveFovLH(Camera->Zoom, Aspect, NearZ, FarZ);
 
     XMFLOAT4X4 Worlds[BOX_COUNT];
     for(i32 Row = 0; Row < 3; ++Row)
@@ -248,9 +250,17 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     }
     WavesUpdate(&State->Waves, Input->dtForFrame);
 
-    XMFLOAT4X4 ViewProj;
-    XMStoreFloat4x4(&ViewProj, View * Projection);
-    RendererRender(Renderer, Thread, Memory, Input, Worlds, &ViewProj, Time, &State->Waves);
+    // The camera, for the pass constants: its matrices separately (the
+    // renderer needs their inverses too), where it is (for lighting's
+    // to-eye vector), and its planes.
+    render_view RenderView;
+    XMStoreFloat4x4(&RenderView.View, View);
+    XMStoreFloat4x4(&RenderView.Proj, Projection);
+    RenderView.EyePosW = XMFLOAT3(Camera->Position.X, Camera->Position.Y, Camera->Position.Z);
+    RenderView.NearZ = NearZ;
+    RenderView.FarZ = FarZ;
+    RendererRender(Renderer, Thread, Memory, Input, Worlds, &RenderView, Time, Input->dtForFrame,
+                   &State->Waves);
 }
 
 extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)

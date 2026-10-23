@@ -63,12 +63,65 @@ DEFINE_CBUFFER(object_constants, b0)
     uint ObjectPad2;
 };
 
-// b1: the whole frame's - written once per frame into slot 0.
+// The most lights one frame can have (8.13.6).  A #define works on both
+// sides, so C and HLSL size the Lights array alike.
+#define MAX_LIGHTS 16
+
+// One light of any kind (Luna's Light, 8.13.1).  Each kind uses only some
+// of the fields.
+//
+// IMPORTANT(yigit): The order packs into exactly three 16-byte rows - each
+// float3 is followed by a float that fills its row:
+//   row 1: Strength.xyz  FalloffStart
+//   row 2: Direction.xyz FalloffEnd
+//   row 3: Position.xyz  SpotPower
+// Three float3s in a row would make HLSL pad after each one (two float3s
+// don't fit in one row) and C wouldn't, and the two would disagree.
+struct light
+{
+    float3 Strength;        // colour and brightness - every kind
+    float FalloffStart;     // point and spot: full strength up to this distance (8.11.1)
+    float3 Direction;       // directional and spot: the way the light travels
+    float FalloffEnd;       // point and spot: no light from this distance on
+    float3 Position;        // point and spot: where the light is
+    float SpotPower;        // spot: how tight the cone is (8.12)
+};
+
+// b1: the whole frame's (Luna's PerPassCB, 7.4.5 and 8.13.6) - written once
+// per frame at the start of the constant buffer.  Matrices transposed, like
+// World.
 DEFINE_CBUFFER(pass_constants, b1)
 {
+    float4x4 View;
+    float4x4 InvView;
+    float4x4 Proj;
+    float4x4 InvProj;
     float4x4 ViewProj;
-    float4 PulseColor;
-    float gTime;
+    float4x4 InvViewProj;
+
+    float3 EyePosW;             // the camera's position in the world - for the to-eye vector
+    float PassPad0;             // fills EyePosW's row
+
+    float2 RenderTargetSize;    // the back buffer's width and height in pixels
+    float2 InvRenderTargetSize; // 1 / those
+
+    float NearZ;                // the near and far planes' distances
+    float FarZ;
+    float TotalTime;            // seconds since startup
+    float DeltaTime;            // seconds this frame took
+
+    float4 AmbientLight;        // the indirect light every surface gets (8.6)
+
+    float4 PulseColor;          // clash's own - the chapter 6 pulse, in cube.hlsl
+
+    // How many of Lights are of each kind.  Directional lights come first,
+    // then point lights, then spot lights (8.13.6).
+    uint NumDirLights;
+    uint NumPointLights;
+    uint NumSpotLights;
+    uint PassPad1;              // fills the counts' row
+
+    light Lights[MAX_LIGHTS];
 };
 
 // One material, as the shaders see it (Luna's MaterialData, 8.9.2) - one
@@ -79,15 +132,14 @@ struct material_data
     float4 DiffuseAlbedo;           // the fraction of red, green, blue it reflects (8.5)
     float3 FresnelR0;               // how much it reflects head-on (8.7.1)
     float Roughness;                // 0 smooth .. 1 rough (8.7.2)
-    float DisplacementScale;
-    uint DiffuseMapIndex;
+    float DisplacementScale;        // displacement mapping - a later chapter
+    uint DiffuseMapIndex;           // which textures - chapter 9 on; 0xFFFFFFFF = none
     uint NormalMapIndex;
     uint GlossHeightAoMapIndex;
-    float4x4 MatTransform;
-    float TransparencyWeight;
-    float IndexOfRefraction;
+    float4x4 MatTransform;          // moves its texture coordinates - chapter 9
+    float TransparencyWeight;       // the ray-tracing chapters
+    float IndexOfRefraction;        // the ray-tracing chapters
 };
-
 
 // NOTE(yigit): The C side takes its type names back.  clash is one unity
 // build - Dear ImGui and SimpleMath are compiled after this file - and a

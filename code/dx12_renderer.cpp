@@ -81,10 +81,13 @@
 #define CONSTANT_BUFFER_SLOT_SIZE D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT
 #define BOX_COUNT 9
 
-// Constant buffer slots: the pass in slot 0, then one per object drawn this
+// Constant buffer slots: the pass first, then one per object drawn this
 // frame, handed out in order by DrawShape - so nothing counts slots by hand.
+// The pass is far bigger than one slot - 16 lights alone are 768 bytes - so
+// it takes PASS_SLOT_COUNT of them, and the objects start after it.
 #define PASS_SLOT 0
-#define FIRST_OBJECT_SLOT 1
+#define PASS_SLOT_COUNT 5
+#define FIRST_OBJECT_SLOT (PASS_SLOT + PASS_SLOT_COUNT)
 #define OBJECT_SLOT_COUNT 64
 #define CONSTANT_BUFFER_SLOT_COUNT (FIRST_OBJECT_SLOT + OBJECT_SLOT_COUNT)
 
@@ -150,7 +153,20 @@ static_assert(sizeof(model_vertex) == 44, "model_vertex: size changed");
 
 // Fail the build if a constants struct no longer fits its 256-byte slot.
 static_assert(sizeof(object_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "object_constants outgrew its slot");
-static_assert(sizeof(pass_constants) <= CONSTANT_BUFFER_SLOT_SIZE, "pass_constants outgrew its slot");
+static_assert(sizeof(pass_constants) <= PASS_SLOT_COUNT*CONSTANT_BUFFER_SLOT_SIZE, "pass_constants outgrew its slots");
+static_assert(sizeof(light) == 48, "light: no longer three 16-byte rows");
+
+// What the game tells the renderer about its camera each frame - the pieces
+// the pass constants are built from.  Row-vector matrices.
+struct render_view
+{
+    XMFLOAT4X4 View;
+    XMFLOAT4X4 Proj;
+    XMFLOAT3 EyePosW;       // the camera's position in the world
+    r32 NearZ;              // the projection's near and far planes
+    r32 FarZ;
+};
+static_assert(sizeof(pass_constants) == 1248, "pass_constants: size changed - check the 16-byte rows");
 static_assert(sizeof(material_data) == 120, "material_data: size changed");
 // A descriptor heap plus what's needed to address slot i (Start + i * DescriptorSize).
 // The size varies by GPU and type, so it's queried once and stored.
@@ -865,7 +881,7 @@ CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     if(!DX12_FAILED(Renderer->CommandAllocator->Reset()) &&
        !DX12_FAILED(Renderer->CommandList->Reset(Renderer->CommandAllocator, 0)))
     {
-        Renderer->CommandList->CopyBufferRegion(*Result, 0, Upload, 0, Size);
+        Renderer->CommandList->CopyResource(*Result, Upload);
         if(!DX12_FAILED(Renderer->CommandList->Close()))
         {
             ID3D12CommandList *Lists[] = {Renderer->CommandList};
@@ -1933,12 +1949,56 @@ UpdateMaterialBuffer(dx12_renderer *Renderer, frame_resource *Frame)
     }
 }
 
+// Fills the pass constants (Luna's UpdateMainPassCB): the camera's matrices
+// and their inverses - all transposed, as HLSL reads them by columns - the
+// eye, the back buffer's size, the planes, the time, and the lights.
+internal void
+FillPassConstants(dx12_renderer *Renderer, const render_view *View, r32 Time, r32 DeltaTime,
+                  pass_constants *Pass)
+{
+    XMMATRIX ViewMatrix = XMLoadFloat4x4(&View->View);
+    XMMATRIX Proj = XMLoadFloat4x4(&View->Proj);
+    XMMATRIX ViewProj = ViewMatrix*Proj;
+
+    // XMMatrixInverse can hand back the determinant; 0 = not wanted.
+    XMStoreFloat4x4(&Pass->View, XMMatrixTranspose(ViewMatrix));
+    XMStoreFloat4x4(&Pass->InvView, XMMatrixTranspose(XMMatrixInverse(0, ViewMatrix)));
+    XMStoreFloat4x4(&Pass->Proj, XMMatrixTranspose(Proj));
+    XMStoreFloat4x4(&Pass->InvProj, XMMatrixTranspose(XMMatrixInverse(0, Proj)));
+    XMStoreFloat4x4(&Pass->ViewProj, XMMatrixTranspose(ViewProj));
+    XMStoreFloat4x4(&Pass->InvViewProj, XMMatrixTranspose(XMMatrixInverse(0, ViewProj)));
+
+    Pass->EyePosW = View->EyePosW;
+    Pass->RenderTargetSize = XMFLOAT2((r32)Renderer->Width, (r32)Renderer->Height);
+    Pass->InvRenderTargetSize = XMFLOAT2(1.0f / (r32)Renderer->Width, 1.0f / (r32)Renderer->Height);
+    Pass->NearZ = View->NearZ;
+    Pass->FarZ = View->FarZ;
+    Pass->TotalTime = Time;
+    Pass->DeltaTime = DeltaTime;
+    Pass->PulseColor = XMFLOAT4(1.0f, 0.0f, 0.5f, 1.0f);
+
+    // The lights - Luna's LitWaves values (8.14): a blue-grey ambient for
+    // the bounced light, and three directional lights - a key light (the
+    // sun), a dimmer fill from the side, and a faint back light.  The
+    // directions are where each light travels; all three point downwards.
+    Pass->AmbientLight = XMFLOAT4(0.25f, 0.25f, 0.35f, 1.0f);
+    Pass->NumDirLights = 3;
+    Pass->NumPointLights = 0;
+    Pass->NumSpotLights = 0;
+    Pass->Lights[0].Direction = XMFLOAT3(0.57735f, -0.57735f, 0.57735f);
+    Pass->Lights[0].Strength = XMFLOAT3(0.9f, 0.9f, 0.9f);
+    Pass->Lights[1].Direction = XMFLOAT3(-0.57735f, -0.57735f, 0.57735f);
+    Pass->Lights[1].Strength = XMFLOAT3(0.3f, 0.3f, 0.3f);
+    Pass->Lights[2].Direction = XMFLOAT3(0.0f, -0.707f, -0.707f);
+    Pass->Lights[2].Strength = XMFLOAT3(0.15f, 0.15f, 0.15f);
+}
+
 // Records and submits one frame: clear, draw the render items, draw ImGui, present.
-// Worlds (the boxes) and ViewProj are row-vector matrices from the game.
+// Worlds (the boxes) and the camera's matrices are row-vector matrices from the game.
 internal void
 RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
-               game_input *Input, const XMFLOAT4X4 *Worlds, const XMFLOAT4X4 *ViewProj, r32 Time,
-               const waves *Waves)
+               game_input *Input, const XMFLOAT4X4 *Worlds, const render_view *View, r32 Time,
+               r32 DeltaTime, const waves *Waves)
 {
     if(!Renderer->SwapChain || !Renderer->BackBuffers[0] || !Renderer->DepthBuffer)
     {
@@ -2013,13 +2073,11 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     // Only if the scene was created successfully.
     if(Renderer->AnimatedPipeline && Frame->ConstantBufferMapped)
     {
-        // The pass: camera and time, into slot 0 of this frame's constant
-        // buffer, read by every draw through b1.
-        // Transposed because HLSL reads constant-buffer matrices column by column.
-        pass_constants Pass;
-        XMStoreFloat4x4(&Pass.ViewProj, XMMatrixTranspose(XMLoadFloat4x4(ViewProj)));
-        Pass.gTime = Time;
-        Pass.PulseColor = {1.0f,0.0f,0.50f,1.0f};
+        // The pass: camera, time and lights, into the start of this frame's
+        // constant buffer, read by every draw through b1.  = {}: every
+        // unused light and all the padding 0, not leftover stack bytes.
+        pass_constants Pass = {};
+        FillPassConstants(Renderer, View, Time, DeltaTime, &Pass);
         memcpy(Frame->ConstantBufferMapped + PASS_SLOT*CONSTANT_BUFFER_SLOT_SIZE, &Pass, sizeof(Pass));
 
         // Set once for every shape: the root signature and b1 at the pass
