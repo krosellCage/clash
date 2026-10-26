@@ -835,6 +835,21 @@ DescribeBuffer(u64 Size)
     return(Result);
 }
 
+// A root parameter that is a root descriptor - a plain GPU address set with
+// SetGraphicsRoot*View - for register Register of Type's kind (CBV = b,
+// SRV = t, UAV = u), space 0, seen by every shader stage.  Luna's
+// CD3DX12_ROOT_PARAMETER::InitAsConstantBufferView / InitAsShaderResourceView.
+inline D3D12_ROOT_PARAMETER
+RootDescriptor(D3D12_ROOT_PARAMETER_TYPE Type, u32 Register)
+{
+    D3D12_ROOT_PARAMETER Result = {};
+    Result.ParameterType = Type;
+    Result.Descriptor.ShaderRegister = Register;
+    Result.Descriptor.RegisterSpace = 0;
+    Result.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    return(Result);
+}
+
 /*
   Creates a VRAM (DEFAULT heap) buffer holding Data, because VRAM is fastest
   for the GPU to read.  The CPU can't write VRAM, so the data goes into a
@@ -939,27 +954,17 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
     //    descriptor heap is needed.  Both pipelines use this same root
     //    signature: their shaders read the same registers.
     // ------------------------------------------------------------------
-    D3D12_ROOT_PARAMETER Parameters[3] = {};
-    Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    Parameters[0].Descriptor.ShaderRegister = 0;        // b0: object_constants
-    Parameters[0].Descriptor.RegisterSpace = 0;
-    // ALL, not just the vertex shader: the pixel shader reads b0's
-    // MaterialIndex to find its material.
-    Parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    Parameters[1].Descriptor.ShaderRegister = 1;        // b1: pass_constants
-    Parameters[1].Descriptor.RegisterSpace = 0;
-    Parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // t0: the material buffer, a StructuredBuffer<material_data> (8.9.2) -
+    // Every stage sees all three (RootDescriptor): the pixel shader reads
+    // b0's MaterialIndex and the materials too, not just the vertex shader.
+    //
+    // t0 is the material buffer, a StructuredBuffer<material_data> (8.9.2) -
     // a root SRV: a buffer the shader reads as an array.  Registers come in
     // kinds that count separately (b constant buffers, t things read, u
-    // things written, s samplers), so this is t0 beside b0 and b1.  ALL:
-    // the pixel shader reads the materials.
-    Parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    Parameters[2].Descriptor.ShaderRegister = 0;        // t0: gMaterialData
-    Parameters[2].Descriptor.RegisterSpace = 0;
-    Parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    // things written, s samplers), so this is t0 beside b0 and b1.
+    D3D12_ROOT_PARAMETER Parameters[3];
+    Parameters[0] = RootDescriptor(D3D12_ROOT_PARAMETER_TYPE_CBV, 0);     // b0: object_constants
+    Parameters[1] = RootDescriptor(D3D12_ROOT_PARAMETER_TYPE_CBV, 1);     // b1: pass_constants
+    Parameters[2] = RootDescriptor(D3D12_ROOT_PARAMETER_TYPE_SRV, 0);     // t0: gMaterialData
 
     // ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT: we feed vertices through an input layout.
     D3D12_ROOT_SIGNATURE_DESC RootDesc = {};
