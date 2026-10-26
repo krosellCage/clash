@@ -899,6 +899,32 @@ CreateStaticBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     return(Copied);
 }
 
+/*
+  Creates an UPLOAD heap buffer of Size bytes and maps it, for data the CPU
+  rewrites every frame (Luna's UploadBuffer).  The GPU reads it in place -
+  no copy - and it stays mapped until it's released, which upload heaps
+  allow.  *Mapped is where the CPU writes.
+*/
+internal b32
+CreateUploadBuffer(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory,
+                   u64 Size, ID3D12Resource **Result, void **Mapped)
+{
+    D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
+    D3D12_RESOURCE_DESC Desc = DescribeBuffer(Size);
+
+    // Empty read range: the CPU only writes.
+    D3D12_RANGE NoRead = {0, 0};
+    if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                                             D3D12_RESOURCE_STATE_GENERIC_READ, 0,
+                                                             IID_PPV_ARGS(Result))) ||
+       DX12_FAILED((*Result)->Map(0, &NoRead, Mapped)))
+    {
+        return(false);
+    }
+
+    return(true);
+}
+
 // Builds everything the scene needs, once at startup: the root signature,
 // the shaders and both pipelines (animated, still), every shape's geometry
 // in VRAM (ShapesMesh) plus the water's static parts (WavesMesh), and each
@@ -1269,48 +1295,31 @@ CreateScene(dx12_renderer *Renderer, thread_context *Thread, game_memory *Memory
     ResetArena(Scratch);
 
     // ------------------------------------------------------------------
-    // 8. Constant buffers, one per frame resource: 256-byte slots - the
-    //    pass, then one per object - in an UPLOAD heap because the CPU
-    //    rewrites them every frame.  Mapped once and left mapped, which
-    //    upload heaps allow.
+    // 8. Each frame resource's buffers the CPU rewrites every frame, all
+    //    UPLOAD heap and left mapped (CreateUploadBuffer).
     // ------------------------------------------------------------------
-    D3D12_HEAP_PROPERTIES UploadHeap = DescribeHeap(D3D12_HEAP_TYPE_UPLOAD);
-    D3D12_RESOURCE_DESC ConstantDesc = DescribeBuffer(CONSTANT_BUFFER_SLOT_COUNT*CONSTANT_BUFFER_SLOT_SIZE);
     for(u32 FrameIndex = 0; FrameIndex < FRAME_RESOURCE_COUNT; ++FrameIndex)
     {
         frame_resource *Frame = &Renderer->Frames[FrameIndex];
-        if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &ConstantDesc,
-                                                                 D3D12_RESOURCE_STATE_GENERIC_READ, 0,
-                                                                 IID_PPV_ARGS(&Frame->ConstantBuffer))))
+
+        // The constant buffer: 256-byte slots - the pass, then one per object.
+        if(!CreateUploadBuffer(Renderer, Thread, Memory, CONSTANT_BUFFER_SLOT_COUNT*CONSTANT_BUFFER_SLOT_SIZE,
+                               &Frame->ConstantBuffer, (void **)&Frame->ConstantBufferMapped))
         {
             return(false);
         }
 
-        // Empty read range: the CPU only writes.
-        D3D12_RANGE NoRead = {0, 0};
-        if(DX12_FAILED(Frame->ConstantBuffer->Map(0, &NoRead, (void **)&Frame->ConstantBufferMapped)))
+        // The water's vertices, sized for every water vertex.
+        if(!CreateUploadBuffer(Renderer, Thread, Memory, Renderer->WavesVertexCount*sizeof(model_vertex),
+                               &Frame->WavesVertexBuffer, (void **)&Frame->WavesVerticesMapped))
         {
             return(false);
         }
 
-        // The water's vertices: made and mapped the same way, sized for
-        // every water vertex.
-        D3D12_RESOURCE_DESC WavesDesc = DescribeBuffer(Renderer->WavesVertexCount*sizeof(model_vertex));
-        if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &WavesDesc,
-                                                                 D3D12_RESOURCE_STATE_GENERIC_READ, 0,
-                                                                 IID_PPV_ARGS(&Frame->WavesVertexBuffer))) ||
-           DX12_FAILED(Frame->WavesVertexBuffer->Map(0, &NoRead, (void **)&Frame->WavesVerticesMapped)))
-        {
-            return(false);
-        }
-
-        // The materials: one material_data per material, made and mapped
-        // the same way - filled by UpdateMaterialBuffer.
-        D3D12_RESOURCE_DESC MaterialsDesc = DescribeBuffer(MATERIAL_COUNT*sizeof(material_data));
-        if(DX12_FAILED(Renderer->Device->CreateCommittedResource(&UploadHeap, D3D12_HEAP_FLAG_NONE, &MaterialsDesc,
-                                                                 D3D12_RESOURCE_STATE_GENERIC_READ, 0,
-                                                                 IID_PPV_ARGS(&Frame->MaterialBuffer))) ||
-           DX12_FAILED(Frame->MaterialBuffer->Map(0, &NoRead, (void **)&Frame->MaterialBufferMapped)))
+        // The materials: one material_data per material, filled by
+        // UpdateMaterialBuffer.
+        if(!CreateUploadBuffer(Renderer, Thread, Memory, MATERIAL_COUNT*sizeof(material_data),
+                               &Frame->MaterialBuffer, (void **)&Frame->MaterialBufferMapped))
         {
             return(false);
         }
