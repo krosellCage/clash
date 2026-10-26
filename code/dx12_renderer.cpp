@@ -450,6 +450,10 @@ struct dx12_renderer
     // one they use.
     material Materials[MATERIAL_COUNT];
 
+    r32    LightRotationAngle;       // how far they've turned so far
+    XMFLOAT3 BaseLightDirections[3];   
+    XMFLOAT3 RotatedLightDirections[3];
+
     render_item RenderItems[MAX_RENDER_ITEMS];
     u32 RenderItemCount;
     u32 FirstBoxItem;
@@ -1786,11 +1790,14 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     Renderer->SrvNextUnused = 0;
     Renderer->SrvFreeCount = 0;
 
-    // Hot pink (255, 105, 180), so the cleared background is obvious; the debug UI can change it.
     Renderer->ClearColor[0] = 0.0f;
     Renderer->ClearColor[1] = 0.0f;
     Renderer->ClearColor[2] = 0.0f;
     Renderer->ClearColor[3] = 1.0f;
+    Renderer->BaseLightDirections[0] = XMFLOAT3(0.57735f, -0.57735f, 0.57735f);
+    Renderer->BaseLightDirections[1] = XMFLOAT3(-0.57735f, -0.57735f, 0.57735f);
+    Renderer->BaseLightDirections[2] = XMFLOAT3(0.0f, -0.707f, -0.707f);
+
 
     // A missing compiler or scene isn't fatal: the game runs with just the clear colour.
     if(!LoadShaderCompiler(Renderer, Thread, Memory))
@@ -1985,11 +1992,11 @@ FillPassConstants(dx12_renderer *Renderer, const render_view *View, r32 Time, r3
     Pass->NumDirLights = 3;
     Pass->NumPointLights = 0;
     Pass->NumSpotLights = 0;
-    Pass->Lights[0].Direction = XMFLOAT3(0.57735f, -0.57735f, 0.57735f);
+    Pass->Lights[0].Direction = Renderer->RotatedLightDirections[0];
     Pass->Lights[0].Strength = XMFLOAT3(0.9f, 0.9f, 0.9f);
-    Pass->Lights[1].Direction = XMFLOAT3(-0.57735f, -0.57735f, 0.57735f);
+    Pass->Lights[1].Direction = Renderer->RotatedLightDirections[1];
     Pass->Lights[1].Strength = XMFLOAT3(0.3f, 0.3f, 0.3f);
-    Pass->Lights[2].Direction = XMFLOAT3(0.0f, -0.707f, -0.707f);
+    Pass->Lights[2].Direction = Renderer->RotatedLightDirections[2];
     Pass->Lights[2].Strength = XMFLOAT3(0.15f, 0.15f, 0.15f);
 }
 
@@ -2068,6 +2075,16 @@ RendererRender(dx12_renderer *Renderer, thread_context *Thread, game_memory *Mem
     // Clears ignore both, which is why the pink worked without them.
     D3D12_RECT Scissor = {0, 0, Renderer->Width, Renderer->Height};
     Renderer->CommandList->RSSetScissorRects(1, &Scissor);
+
+    Renderer->LightRotationAngle += 0.1f * DeltaTime;
+    XMMATRIX R = XMMatrixRotationY(Renderer->LightRotationAngle);
+
+    for(u32 LightIndex = 0; LightIndex < 3; ++LightIndex)
+    {
+        XMVECTOR Direction = XMLoadFloat3(&Renderer->BaseLightDirections[LightIndex]);
+        Direction = XMVector3TransformNormal(Direction,R);
+        XMStoreFloat3(&Renderer->RotatedLightDirections[LightIndex], Direction);
+    }
 
     //NOTE:(yigit): Drawing
     // Only if the scene was created successfully.
