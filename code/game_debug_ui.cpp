@@ -76,6 +76,36 @@ DrawDebugUI(game_state *State, dx12_renderer *Renderer)
                 State->Camera.Yaw * (180.0f / Pi32), State->Camera.Pitch * (180.0f / Pi32));
 
     ImGui::Separator();
+
+    if(ImGui::CollapsingHeader("lights"))
+    {
+        ImGui::SliderFloat3("sun", &Renderer->LightStrengths[0].x, 0.0f, 1.0f);
+        ImGui::SliderFloat3("fill", &Renderer->LightStrengths[1].x, 0.0f, 1.0f);
+        ImGui::SliderFloat3("back", &Renderer->LightStrengths[2].x, 0.0f, 1.0f);
+        ImGui::SliderFloat3("ambient", &Renderer->AmbientLight.x, 0.0f, 1.0f);
+    }
+
+    // Each material's roughness.  The slider edits the CPU copy only - so
+    // when it changes, the material is marked dirty, and UpdateMaterialBuffer
+    // copies it into each frame resource's material buffer in turn.
+    if(ImGui::CollapsingHeader("materials"))
+    {
+        // In material_id order.
+        const char *MaterialNames[MATERIAL_COUNT] =
+        {
+            "forest green", "steel blue", "light gray", "circle", "lake blue",
+        };
+        for(u32 MaterialIndex = 0; MaterialIndex < MATERIAL_COUNT; ++MaterialIndex)
+        {
+            material *Material = &Renderer->Materials[MaterialIndex];
+            if(ImGui::SliderFloat(MaterialNames[MaterialIndex], &Material->Roughness, 0.0f, 1.0f))
+            {
+                Material->NumFramesDirty = FRAME_RESOURCE_COUNT;
+            }
+        }
+    }
+
+    ImGui::Separator();
     bool ShowDemo = (State->ShowImGuiDemo != 0);
     if(ImGui::Checkbox("Dear ImGui demo window", &ShowDemo))
     {

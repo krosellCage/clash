@@ -454,6 +454,9 @@ struct dx12_renderer
     XMFLOAT3 BaseLightDirections[3];   
     XMFLOAT3 RotatedLightDirections[3];
 
+    XMFLOAT3 LightStrengths[3];
+    XMFLOAT4 AmbientLight;
+
     render_item RenderItems[MAX_RENDER_ITEMS];
     u32 RenderItemCount;
     u32 FirstBoxItem;
@@ -1811,6 +1814,12 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
     Renderer->BaseLightDirections[0] = XMFLOAT3(0.57735f, -0.57735f, 0.57735f);
     Renderer->BaseLightDirections[1] = XMFLOAT3(-0.57735f, -0.57735f, 0.57735f);
     Renderer->BaseLightDirections[2] = XMFLOAT3(0.0f, -0.707f, -0.707f);
+    
+    Renderer->LightStrengths[0] = XMFLOAT3(0.9f, 0.9f, 0.9f);
+    Renderer->LightStrengths[1] = XMFLOAT3(0.3f, 0.3f, 0.3f);
+    Renderer->LightStrengths[2] = XMFLOAT3(0.15f, 0.15f, 0.15f);
+
+    Renderer->AmbientLight = XMFLOAT4(0.25f, 0.25f, 0.35f, 1.0f);
 
 
     // A missing compiler or scene isn't fatal: the game runs with just the clear colour.
@@ -2002,16 +2011,16 @@ FillPassConstants(dx12_renderer *Renderer, const render_view *View, r32 Time, r3
     // the bounced light, and three directional lights - a key light (the
     // sun), a dimmer fill from the side, and a faint back light.  The
     // directions are where each light travels; all three point downwards.
-    Pass->AmbientLight = XMFLOAT4(0.25f, 0.25f, 0.35f, 1.0f);
+    Pass->AmbientLight = Renderer->AmbientLight;
     Pass->NumDirLights = 3;
     Pass->NumPointLights = 0;
     Pass->NumSpotLights = 0;
     Pass->Lights[0].Direction = Renderer->RotatedLightDirections[0];
-    Pass->Lights[0].Strength = XMFLOAT3(0.9f, 0.9f, 0.9f);
+    Pass->Lights[0].Strength = Renderer->LightStrengths[0];
     Pass->Lights[1].Direction = Renderer->RotatedLightDirections[1];
-    Pass->Lights[1].Strength = XMFLOAT3(0.3f, 0.3f, 0.3f);
+    Pass->Lights[1].Strength = Renderer->LightStrengths[1];
     Pass->Lights[2].Direction = Renderer->RotatedLightDirections[2];
-    Pass->Lights[2].Strength = XMFLOAT3(0.15f, 0.15f, 0.15f);
+    Pass->Lights[2].Strength = Renderer->LightStrengths[2];
 }
 
 // Records and submits one frame: clear, draw the render items, draw ImGui, present.
