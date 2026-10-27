@@ -163,6 +163,7 @@ struct render_view
     XMFLOAT4X4 View;
     XMFLOAT4X4 Proj;
     XMFLOAT3 EyePosW;       // the camera's position in the world
+    XMFLOAT3 CameraDirection;
     r32 NearZ;              // the projection's near and far planes
     r32 FarZ;
 };
@@ -456,6 +457,12 @@ struct dx12_renderer
 
     XMFLOAT3 LightStrengths[3];
     XMFLOAT4 AmbientLight;
+
+    b32 FlashlightOn;
+    XMFLOAT3 FlashlightStrength;
+    r32 FlashlightFalloffStart;
+    r32 FlashlightFalloffEnd;
+    r32 FlashlightSpotPower;
 
     render_item RenderItems[MAX_RENDER_ITEMS];
     u32 RenderItemCount;
@@ -1821,6 +1828,11 @@ RendererInitialize(dx12_renderer *Renderer, thread_context *Thread, game_memory 
 
     Renderer->AmbientLight = XMFLOAT4(0.25f, 0.25f, 0.35f, 1.0f);
 
+    Renderer->FlashlightOn = false;
+    Renderer->FlashlightStrength = XMFLOAT3(1.0f, 1.0f, 1.0f);
+    Renderer->FlashlightFalloffStart = 1.0f;
+    Renderer->FlashlightFalloffEnd = 50.0f;
+    Renderer->FlashlightSpotPower = 32.0f;
 
     // A missing compiler or scene isn't fatal: the game runs with just the clear colour.
     if(!LoadShaderCompiler(Renderer, Thread, Memory))
@@ -2012,15 +2024,34 @@ FillPassConstants(dx12_renderer *Renderer, const render_view *View, r32 Time, r3
     // sun), a dimmer fill from the side, and a faint back light.  The
     // directions are where each light travels; all three point downwards.
     Pass->AmbientLight = Renderer->AmbientLight;
-    Pass->NumDirLights = 3;
-    Pass->NumPointLights = 0;
-    Pass->NumSpotLights = 0;
-    Pass->Lights[0].Direction = Renderer->RotatedLightDirections[0];
-    Pass->Lights[0].Strength = Renderer->LightStrengths[0];
-    Pass->Lights[1].Direction = Renderer->RotatedLightDirections[1];
-    Pass->Lights[1].Strength = Renderer->LightStrengths[1];
-    Pass->Lights[2].Direction = Renderer->RotatedLightDirections[2];
-    Pass->Lights[2].Strength = Renderer->LightStrengths[2];
+
+    if(Renderer->FlashlightOn)
+    {
+        Pass->NumDirLights = 0;
+        Pass->NumPointLights = 0;
+        Pass->NumSpotLights = 1;
+
+        light *Flashlight = &Pass->Lights[0];
+        Flashlight->Position     = View->EyePosW;
+        Flashlight->Direction    = View->CameraDirection;
+        Flashlight->Strength     = Renderer->FlashlightStrength;
+        Flashlight->FalloffStart = Renderer->FlashlightFalloffStart;
+        Flashlight->FalloffEnd   = Renderer->FlashlightFalloffEnd;
+        Flashlight->SpotPower    = Renderer->FlashlightSpotPower;
+    }
+    else
+    {
+        Pass->NumDirLights = 3;
+        Pass->NumPointLights = 0;
+        Pass->NumSpotLights = 0;
+        Pass->Lights[0].Direction = Renderer->RotatedLightDirections[0];
+        Pass->Lights[0].Strength = Renderer->LightStrengths[0];
+        Pass->Lights[1].Direction = Renderer->RotatedLightDirections[1];
+        Pass->Lights[1].Strength = Renderer->LightStrengths[1];
+        Pass->Lights[2].Direction = Renderer->RotatedLightDirections[2];
+        Pass->Lights[2].Strength = Renderer->LightStrengths[2];
+    }
+
 }
 
 // Records and submits one frame: clear, draw the render items, draw ImGui, present.

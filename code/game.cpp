@@ -257,6 +257,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     XMStoreFloat4x4(&RenderView.View, View);
     XMStoreFloat4x4(&RenderView.Proj, Projection);
     RenderView.EyePosW = XMFLOAT3(Camera->Position.X, Camera->Position.Y, Camera->Position.Z);
+    RenderView.CameraDirection = XMFLOAT3(Camera->Front.X, Camera->Front.Y, Camera->Front.Z);
     RenderView.NearZ = NearZ;
     RenderView.FarZ = FarZ;
     RendererRender(Renderer, Thread, Memory, Input, Worlds, &RenderView, Time, Input->dtForFrame,

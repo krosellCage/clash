@@ -83,6 +83,14 @@ DrawDebugUI(game_state *State, dx12_renderer *Renderer)
         ImGui::SliderFloat3("fill", &Renderer->LightStrengths[1].x, 0.0f, 1.0f);
         ImGui::SliderFloat3("back", &Renderer->LightStrengths[2].x, 0.0f, 1.0f);
         ImGui::SliderFloat3("ambient", &Renderer->AmbientLight.x, 0.0f, 1.0f);
+        bool FlashlightOn = (Renderer->FlashlightOn != 0);
+        if(ImGui::Checkbox("flashlight", &FlashlightOn))
+        {
+            Renderer->FlashlightOn = FlashlightOn;
+        }
+        ImGui::SliderFloat3("flashlight strength", &Renderer->FlashlightStrength.x, 0.0f, 1.0f);
+        ImGui::SliderFloat("flashlight cone", &Renderer->FlashlightSpotPower, 1.0f, 128.0f);
+        ImGui::SliderFloat("flashlight range", &Renderer->FlashlightFalloffEnd, 1.0f, 200.0f);
     }
 
     // Each material's roughness.  The slider edits the CPU copy only - so
