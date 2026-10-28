@@ -1440,13 +1440,14 @@ BuildRenderItems(dx12_renderer *Renderer)
     AddMeshRenderItem(Renderer, &Renderer->WavesMesh, 0, XMMatrixTranslation(0.0f, -5.0f, 0.0f),
                       RENDER_LAYER_STILL, MATERIAL_LAKE_BLUE);
 
-    // A row of 5 cylinders behind the boxes, standing on the floor (3 tall
-    // and centred, so their middle is 1.5 above -5).
     for(u32 CylinderIndex = 0; CylinderIndex < 5; ++CylinderIndex)
     {
         AddRenderItem(Renderer, SHAPE_CYLINDER,
                       XMMatrixTranslation((r32)CylinderIndex*3.0f - 6.0f, -3.5f, 9.0f),
                       RENDER_LAYER_STILL, MATERIAL_LIGHT_GRAY);
+        AddRenderItem(Renderer, SHAPE_GEOSPHERE, XMMatrixScaling(0.5f, 0.5f, 0.5f) * 
+                XMMatrixTranslation((r32)CylinderIndex*3.0f - 6.0f, -1.5f, 9.0f),
+                RENDER_LAYER_STILL, MATERIAL_SKULL);
     }
 
     // In front of the boxes: the pyramid and the cone on the floor, the
